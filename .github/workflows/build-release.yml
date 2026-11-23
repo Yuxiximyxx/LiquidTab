@@ -37,6 +37,7 @@ jobs:
 
       - name: Build release (unsigned)
         run: |
+          sed -i 's/\r$//' ./gradlew
           chmod +x ./gradlew
           bash ./gradlew :app:assembleRelease --stacktrace
 
