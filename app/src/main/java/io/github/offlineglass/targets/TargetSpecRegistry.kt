@@ -13,6 +13,8 @@ internal object TargetSpecRegistry {
         io.github.offlineglass.hook.adapters.mi_community.targetSpec,
         io.github.offlineglass.hook.adapters.netease.targetSpec,
         io.github.offlineglass.hook.adapters.qqmusic.targetSpec,
+        io.github.offlineglass.hook.adapters.qtl.targetSpec,
+        io.github.offlineglass.hook.adapters.heybox.targetSpec,
         io.github.offlineglass.hook.adapters.spotify.targetSpec,
         io.github.offlineglass.hook.adapters.apple_music.targetSpec,
         io.github.offlineglass.hook.adapters.xhs.targetSpec,

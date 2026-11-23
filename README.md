@@ -22,7 +22,7 @@ LiquidTab 同时使用 Miuix、AndroidX 和 Android 原生渲染能力，并包�
 
 正式作用域由 `app/src/main/resources/META-INF/xposed/scope.list` 提供，与模块的应用列表一致：
 
-高德地图、哔哩哔哩、哔哩哔哩国际版、美团外卖、美团、米家、小米社区、小米运动健康、小米应用商店、网易云音乐、QQ 音乐、Spotify、Apple Music、小红书、拼多多、淘宝、抖音、TikTok、菜鸟、闲鱼、京东、百度贴吧、YouTube、微博、微信、移动交通大学、知乎、ChatGPT、华为运动健康、X、Instagram、Reddit、Quora。
+高德地图、哔哩哔哩、哔哩哔哩国际版、美团外卖、美团、米家、小米社区、小米运动健康、小米应用商店、网易云音乐、QQ 音乐、掌上英雄联盟、小黑盒、Spotify、Apple Music、小红书、拼多多、淘宝、抖音、TikTok、菜鸟、闲鱼、京东、百度贴吧、YouTube、微博、微信、移动交通大学、知乎、ChatGPT、华为运动健康、X、Instagram、Reddit、Quora。
 
 小米桌面、小米系统界面、小米相册和超级小爱不属于本次正式适配范围。
 
