@@ -32,6 +32,8 @@ import io.github.offlineglass.hook.adapters.xianyu.XianyuAdapter
 import io.github.offlineglass.hook.adapters.cainiao.CainiaoAdapter
 import io.github.offlineglass.hook.adapters.jd.JdAdapter
 import io.github.offlineglass.hook.adapters.qqmusic.QqMusicAdapter
+import io.github.offlineglass.hook.adapters.qtl.QtlAdapter
+import io.github.offlineglass.hook.adapters.heybox.HeyboxAdapter
 import io.github.offlineglass.hook.adapters.spotify.SpotifyAdapter
 import io.github.offlineglass.hook.adapters.apple_music.AppleMusicAdapter
 import io.github.offlineglass.hook.adapters.xjtu.XjtuAdapter
@@ -663,6 +665,8 @@ internal interface AppNativeChromeController {
 internal object TargetAdapterRegistry {
     private val custom = listOf(
         QqMusicAdapter,
+        QtlAdapter,
+        HeyboxAdapter,
         SpotifyAdapter,
         AppleMusicAdapter,
         DouyinAdapter,

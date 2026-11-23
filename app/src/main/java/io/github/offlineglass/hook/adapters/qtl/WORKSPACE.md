@@ -1,16 +1,25 @@
 # qtl（掌上英雄联盟）适配工作说明
 
 - 目标应用：掌上英雄联盟，包名 `com.tencent.qt.qtl`，目标版本 12.10.0。
-- 接入方式：纯配置（`TargetSpec.kt`，`GENERIC_FALLBACK`），无专属适配器类；
-  运行时由注册表自动落到通用 `MetadataOnlyAdapter` + 通用导航发现。
+- 接入方式：专属适配器 `QtlAdapter`（2.1.4 起，`DEDICATED`）；
+  发现/布局/抑制均由适配器钉死，渲染走共享核心。
 - 已知宿主结构（来自 PalmPurify 项目，12.9.0 时代定位成果）：
   - 首页 Activity：`com.tencent.zone.main.zm.GameHomeActivity`；
-  - 底栏文字行资源名 `tab_title_content`（四个文字槽：首个「首页」、末个「我的」）；
+  - 底栏文字行资源名 `tab_title_content`（子项为各 tab，中间留发布位）；
   - 中间加号按钮资源名 `bottom_title_center_btn`，合计 5 槽位。
-- 注意：12.10.0 上 PalmPurify 旧的「同时包含 tab_title_content 与中间加号的
-  父容器」特征已失效，因此本 spec 只把上述资源名作打分提示，不作唯一命中条件。
-- 中间两个 tab 的文字、强调色尚未真机确认，`entryLabels` 与
-  `defaultAccentColor` 暂不写死，待真机探针后再补。
-- 状态：曾随 fork 2.0.1 发布并真机初验——通用发现命中、玻璃条生成，
-  但有黑背景、按钮偏移、发布按钮样式、设置页无入口开关四项已知问题，
-  均待后续版本处理；现已按 2.1.2 契约原样移植到新基线（fork 2.1.3）。
+- 2.1.4 的处理（针对 2.0.x 真机初验的四项问题）：
+  - 源钉死为「同时含文字行与加号按钮的底栏容器」（找不到退回文字行），
+    消除通用发现选源不稳带来的偏移；
+  - `suppressNativeBottomChrome` 清掉容器/文字行/加号按钮及向上三层
+    底部壳层的底色与前景，内容若被 RelativeLayout ABOVE 规则顶住
+    则放开规则铺底，去掉玻璃条后面的黑带；
+  - 加号按钮若不在源内（个别版本挂在根布局），`prepareNavigationSource`
+    会把它移入底栏容器，避免在玻璃条后单独绘制透出；
+  - 中间槽位走 `sourceCenterActionIndex` + 0.7 裁剪比（美团同款参数）；
+    点按由 `dispatchNavigationTap` 按槽位→真实视图映射转发；
+  - 独立发布键复用上游机制：spec `defaultDetachedPublish = true` +
+    适配器 `barLayout` 给出 tieba/xhs 同款几何；逐项入口开关复用
+    上游机制：spec `entryLabels`（首页/社区/发布/商城/我的）生成
+    设置页开关。注意「社区」为第二个 tab 的推测文字，未真机确认；
+    管理器运行时学到的宿主标签会覆盖 spec 标签。
+- 状态：2.1.4 已发布待验，以上均为代码层修复，未经真机验证。

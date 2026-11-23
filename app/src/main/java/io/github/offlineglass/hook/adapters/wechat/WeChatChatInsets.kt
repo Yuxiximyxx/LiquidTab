@@ -25,6 +25,7 @@ internal object WeChatChatInsets {
     private val nativeInsets = WeakHashMap<View, NativeInset>()
     private data class NativeInset(val width: Int, val height: Int, val bottom: Int)
     private val observed = WeakHashMap<View, Unit>()
+    private const val CHAT_FOOTER_CLASS = "com.tencent.mm.pluginsdk.ui.chat.ChatFooter"
 
     fun configure(decor: View, enabled: Boolean) {
         activityOf(decor)?.window?.navigationBarColor?.let { color ->
@@ -227,7 +228,59 @@ internal object WeChatChatInsets {
                 ownerContentBottom,
                 pagePosition[1] + page.height + ownedPadding - page.paddingBottom,
             )
-            return (nativeContentBottom - safeBottom).coerceIn(0, nav)
+            // Current WeChat already insets its own ChatFooter by the
+            // navigation-bar height once the window is edge-to-edge (the
+            // module's immersion makes it so). Adding the full inset again
+            // on top leaves a second, empty navigation-height strip below
+            // the conversation. Deduct the inset the footer already
+            // carries (its bottom padding, or the gap beneath it).
+            return (nativeContentBottom - safeBottom - existingFooterInset(nav)).coerceIn(0, nav)
+        }
+
+        private var chatFooter: View? = null
+        private var chatFooterSearchAt = 0L
+
+        private fun existingFooterInset(nav: Int): Int {
+            val now = SystemClock.uptimeMillis()
+            var footer = chatFooter?.takeIf { it.isAttachedToWindow && isDescendantOf(it, page) }
+            if (footer == null && now >= chatFooterSearchAt) {
+                chatFooterSearchAt = now + 1_000L
+                footer = findChatFooter()
+                chatFooter = footer
+            }
+            val target = footer ?: return 0
+            val footerPosition = IntArray(2)
+            target.getLocationOnScreen(footerPosition)
+            page.getLocationOnScreen(pagePosition)
+            val pageContentBottom = pagePosition[1] + page.height - page.paddingBottom
+            val gap = (pageContentBottom - (footerPosition[1] + target.height)).coerceAtLeast(0)
+            return maxOf(gap, target.paddingBottom).coerceIn(0, nav)
+        }
+
+        private fun findChatFooter(): View? {
+            val stack = ArrayDeque<Pair<View, Int>>()
+            stack += page to 0
+            var visited = 0
+            while (stack.isNotEmpty() && visited++ < 600) {
+                val (view, depth) = stack.removeLast()
+                val name = view.javaClass.name
+                if (name == CHAT_FOOTER_CLASS || name.endsWith(".ChatFooter")) return view
+                if (view is ViewGroup && depth < 8) {
+                    for (index in view.childCount - 1 downTo 0) {
+                        stack += view.getChildAt(index) to (depth + 1)
+                    }
+                }
+            }
+            return null
+        }
+
+        private fun isDescendantOf(view: View, ancestor: View): Boolean {
+            var current: View? = view
+            while (current != null) {
+                if (current === ancestor) return true
+                current = current.parent as? View
+            }
+            return false
         }
 
         @android.annotation.TargetApi(30)

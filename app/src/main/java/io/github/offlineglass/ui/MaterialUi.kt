@@ -829,6 +829,8 @@ private fun MaterialAppOverride(target: TargetSpec, settings: ManagerSettings, p
         if (((target.key == "bilibili" || target.key == "xhs" || target.key == "zhihu") &&
             config.hiddenMask and (1 shl 2) == 0) ||
             (target.key == "xianyu" && config.hiddenMask and (1 shl 2) == 0) ||
+            ((target.key == "qtl" || target.key == "heybox") &&
+            config.hiddenMask and (1 shl 2) == 0) ||
             (target.key == "tieba" && config.isTiebaPublishVisible())) {
             item {
                 Card(modifier = Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.extraLarge) {
@@ -837,6 +839,8 @@ private fun MaterialAppOverride(target: TargetSpec, settings: ManagerSettings, p
                         else if (target.key == "zhihu") "开启后四个页面在左，半透明蓝色发布键独立在右，两部分分别绘制阴影。"
                         else if (target.key == "xhs") "开启后四个页面在左，红色发布键独立在右，两部分分别绘制阴影。"
                         else if (target.key == "tieba") "开启后四个页面在左，蓝色发布键独立在右，整体左右边距不变。"
+                        else if (target.key == "qtl") "开启后四个页面在左，蓝色发布键独立在右，整体左右边距不变。"
+                        else if (target.key == "heybox") "开启后四个页面在左，发布键独立在右，整体左右边距不变。"
                         else "开启后四个页面在左，粉色发布键独立在右，整体左右边距不变。", config.detachedPublish) { checked ->
                         actions.setAppConfig(target.packageName, config.copy(
                             detachedPublish = checked,

@@ -1,22 +1,33 @@
 # heybox（小黑盒）适配工作说明
 
 - 目标应用：小黑盒，包名 `com.max.xiaoheihe`，目标版本 1.3.402。
-- 接入方式：纯配置（`TargetSpec.kt`，`GENERIC_FALLBACK`），无专属适配器类；
+- 接入方式：专属适配器 `HeyboxAdapter`（2.1.4 起，`DEDICATED`）；
   渲染一律走 LiquidTab 共享核心，不移植 BetterHeybox 的玻璃绘制代码。
 - 发现信号（来自 BetterHeybox「液态玻璃（底栏）」实现的定位成果）：
   - 主页 Activity：`com.max.xiaoheihe.MainActivity`；
-  - 底栏容器：RadioGroup，资源名 `rg_main`，位于根 `vg_main_root` 内；
-  - 中间 tab 容器资源名 `vg_mid_tab`（发布动作），单颗 tab 为 `rb_1` 起的
-    RadioButton 序列，合计 5 槽位；
-  - 内容区 `fl_container`；底栏上方有提示条 `vg_tips`。
-- 页面政策/例外（同源记录，先记下，第一版靠通用页面可见性处理）：
-  - 全屏视频容器 `vg_fullscreen_video_container` 出现时底栏应隐藏；
-  - 底栏标签与图标可由服务端热更新下发（1.3.400/1.3.401 起有专门的
-    底栏配置热更新通道），文字标签不稳定，故 spec 只用「首页/我的」
-    两个稳定标签作打分提示。
+  - 根 `vg_main_root`（RelativeLayout），内容 `fl_container` 以
+    ABOVE 规则顶在底栏上方；
+  - 底栏 RadioGroup 资源名 `rg_main`，子项 `rb_1` 起的 RadioButton
+    序列（rb_3 为中间占位，原生文字「推荐」）；
+  - 加号按钮 `vg_mid_tab` 独立于 RadioGroup，盖在 rb_3 占位上；
+  - 底栏上方有提示条 `vg_tips`。
+- 2.1.4 的处理（针对 2.0.x 真机初验的四项问题）：
+  - 源钉死为 `rg_main`；`prepareNavigationSource` 把 `vg_mid_tab`
+    移入 rg_main 顶替 rb_3 占位并继承其布局参数（重绑时复查，
+    防底栏热更新把它挂回根布局），使五个槽位的 artwork/点按/
+    显隐回到同一索引空间，消除加号在源外绘制透过玻璃发糊错位；
+  - `suppressNativeBottomChrome` 清 rg_main 底色，放开
+    `fl_container` 的 ABOVE 规则让内容铺到屏幕底部（华为健康
+    适配同款），并清掉与底栏同高且重叠的兄弟薄层（阴影层）底色，
+    去掉玻璃条后面的黑带；
+  - 独立发布键与逐项入口开关复用上游机制：spec
+    `defaultDetachedPublish = true` + 适配器 `barLayout`（tieba/xhs
+    同款几何）+ spec `entryLabels`（首页/热点/发布/游戏库/我；
+    中间槽位原生占位文字是「推荐」，实际动作是发布，故标「发布」）。
+- 页面政策/例外（沿用旧记录）：全屏视频容器
+  `vg_fullscreen_video_container` 出现时底栏应隐藏（靠通用页面
+  可见性处理）；底栏标签/图标可由服务端热更新下发。
 - 冲突提醒：启用本模块的小黑盒玻璃后，需关掉 BetterHeybox（独立版或
   荣耀工具箱内「小黑盒增强」）自带的液态玻璃底栏开关，避免同一底栏
-  被处理两次。
-- 状态：曾随 fork 2.0.2 发布并真机初验——通用发现命中、玻璃条生成，
-  但有黑背景、按钮偏移、发布按钮样式、设置页无入口开关四项已知问题，
-  均待后续版本处理；现已按 2.1.2 契约原样移植到新基线（fork 2.1.3）。
+  被处理两次。注意工具箱 v1.10.0 起已移除其小黑盒底栏功能。
+- 状态：2.1.4 已发布待验，以上均为代码层修复，未经真机验证。
