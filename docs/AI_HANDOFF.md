@@ -15,7 +15,7 @@
 
 The registry currently knows these adapter keys:
 
-`amap`, `bilibili`, `bilibili_in`, `cainiao`, `douyin`, `hellobike`, `jd`,
+`amap`, `bilibili`, `bilibili_in`, `cainiao`, `douyin`, `hellobike`, `heybox`, `jd`,
 `meituan`, `meituan_main`, `mi_calendar`, `mi_community`, `mi_file_manager`,
 `mi_gallery`, `mi_health`, `mi_market`, `mi_messages`, `mi_notes`, `mi_phone`,
 `mi_theme`, `mihome`, `netease`, `pdd`, `qqmusic`, `qtl`, `system_picker`, `taobao`,

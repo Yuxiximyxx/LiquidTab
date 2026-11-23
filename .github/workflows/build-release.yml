@@ -53,9 +53,9 @@ jobs:
           "$SDK/zipalign" -p -f 4 "$SRC" dist/aligned.apk
           "$SDK/apksigner" sign --ks "$RUNNER_TEMP/liquidtab-release.keystore" \
             --ks-pass env:STORE_PASSWORD --ks-key-alias "$KEY_ALIAS" --key-pass env:KEY_PASSWORD \
-            --out dist/LiquidTab-2.0.1-release.apk dist/aligned.apk
+            --out dist/LiquidTab-2.0.2-release.apk dist/aligned.apk
           rm dist/aligned.apk
-          "$SDK/apksigner" verify --print-certs dist/LiquidTab-2.0.1-release.apk
+          "$SDK/apksigner" verify --print-certs dist/LiquidTab-2.0.2-release.apk
           ls -lh dist
 
       - name: Upload artifact
@@ -68,32 +68,36 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v2.0.1
-          name: LiquidTab 2.0.1（fork：新增掌上英雄联盟适配）
+          tag_name: v2.0.2
+          name: LiquidTab 2.0.2（fork：新增小黑盒适配）
           body: |
-            ## LiquidTab 2.0.1（Yuxiximyxx fork）
+            ## LiquidTab 2.0.2（Yuxiximyxx fork）
 
-            基于上游 big-dictator/LiquidTab 2.0（versionCode 217），
-            本版 versionName 2.0.1 / versionCode 218。
+            基于上游 big-dictator/LiquidTab 2.0，本版
+            versionName 2.0.2 / versionCode 219。2.0.1 的
+            掌上英雄联盟适配保留，正式适配应用 25 → 26 个。
 
             ### 本版改动
 
-            - **新增掌上英雄联盟（掌盟，com.tencent.qt.qtl）适配**：
-              纯配置接入（adapters/qtl，GENERIC_FALLBACK），走通用
-              导航发现；TargetSpecRegistry、AppCatalog 与
-              assets/xposed_scope 三处已同步登记，正式适配应用
-              24 → 25 个。结构提示来自 PalmPurify 项目对掌盟底栏
-              的定位（首页 GameHomeActivity、tab_title_content
-              文字行 + bottom_title_center_btn 中间加号、5 槽位）；
-              12.10.0 上旧父容器特征已失效，故只作打分提示、
-              不写死单一命中条件。
-            - 其余与上游 2.0 一致，共享渲染核心未改。
+            - **新增小黑盒（com.max.xiaoheihe）适配**：纯配置
+              接入（adapters/heybox，GENERIC_FALLBACK），渲染
+              走 LiquidTab 共享核心；发现信号来自 BetterHeybox
+              液态玻璃底栏的定位成果（主页 MainActivity、底栏
+              RadioGroup 资源名 rg_main、中间 tab vg_mid_tab、
+              5 槽位），只移植「底栏怎么找、有什么特殊政策」，
+              未搬其玻璃绘制代码。TargetSpecRegistry、
+              AppCatalog 与 assets/xposed_scope 三处已同步。
+            - 其余与 2.0.1 一致，共享渲染核心未改。
 
             ### 注意
 
-            - 掌盟适配**未经真机验证**：请在 LSPosed 作用域勾选
-              掌上英雄联盟，强停重开掌盟后看底栏是否变为悬浮
-              玻璃。若第一版在 12.10.0 上未命中，下一步将出探针
-              版定位底栏结构。
+            - **冲突提醒**：启用 LiquidTab 的小黑盒玻璃后，
+              请关掉 BetterHeybox（独立版或荣耀工具箱内
+              「小黑盒增强」）自带的液态玻璃底栏开关，避免
+              同一底栏被处理两次。
+            - 小黑盒适配**未经真机验证**：请在 LSPosed 作用域
+              勾选小黑盒，强停重开后看底栏是否变为悬浮玻璃。
+              若第一版在 1.3.402 上未命中，下一步将出探针版
+              定位底栏结构。
             - 本 fork 使用自有签名，与上游原版不能互相覆盖安装。
           files: dist/*.apk
