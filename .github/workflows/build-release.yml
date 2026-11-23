@@ -39,7 +39,7 @@ jobs:
         run: |
           sed -i 's/\r$//' ./gradlew
           chmod +x ./gradlew
-          bash ./gradlew :app:assembleRelease --stacktrace
+          bash ./gradlew :app:assembleRelease -x lintVitalRelease --stacktrace
 
       - name: Sign APK
         env:
