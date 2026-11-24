@@ -1,13 +1,16 @@
 package io.github.offlineglass.hook.adapters.heybox
 
+import android.content.Context
 import android.graphics.Color
 import android.graphics.drawable.ColorDrawable
 import android.view.View
 import android.view.ViewGroup
 import android.widget.RelativeLayout
 import io.github.offlineglass.config.GlassConfig
+import io.github.offlineglass.hook.GlassHostLayout
 import io.github.offlineglass.hook.NavigationCandidate
 import io.github.offlineglass.hook.adapters.AdapterBarLayout
+import io.github.offlineglass.hook.adapters.AppNavigationState
 import io.github.offlineglass.hook.adapters.TargetAdapter
 import io.github.offlineglass.targets.TargetSpec
 
@@ -37,6 +40,19 @@ internal object HeyboxAdapter : TargetAdapter {
     override val sourceCenterActionIndex = CENTER_INDEX
     override val sourceCenterTranslationDp = -2f
     override val sourceCenterClipRatio = 0.7f
+
+    // 独立发布键的圆钮没有任何通用路径绘制 artwork (xhs/贴吧
+    // 均自绘), 故本适配自持绘制: 通用投影 + vg_mid_tab 图标叶子。
+    override val ownsNavigationDrawing = true
+
+    override fun createNavigationState(context: Context, host: GlassHostLayout): AppNavigationState =
+        HeyboxNavigationState(host)
+
+    // 沉浸: 共享安装器只做到窗口标志与导航条透明, 宿主根布局仍
+    // 按 navigationBars inset 留底; 在此把主界面窗口的导航条
+    // 底部 inset 清零, 内容才真正铺到物理底部 (见 HeyboxInsets)。
+    override fun configureNavigationInsets(decor: View, enabled: Boolean) =
+        HeyboxInsets.configure(decor, enabled)
 
     override fun findNavigation(root: View, spec: TargetSpec): NavigationCandidate? {
         val bar = findByEntryName(root, BAR_ID) as? ViewGroup ?: return null

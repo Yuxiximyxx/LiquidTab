@@ -54,9 +54,9 @@ jobs:
           "$SDK/zipalign" -p -f 4 "$SRC" dist/aligned.apk
           "$SDK/apksigner" sign --ks "$RUNNER_TEMP/liquidtab-release.keystore" \
             --ks-pass env:STORE_PASSWORD --ks-key-alias "$KEY_ALIAS" --key-pass env:KEY_PASSWORD \
-            --out dist/LiquidTab-2.1.4-release.apk dist/aligned.apk
+            --out dist/LiquidTab-2.1.5-release.apk dist/aligned.apk
           rm dist/aligned.apk
-          "$SDK/apksigner" verify --print-certs dist/LiquidTab-2.1.4-release.apk
+          "$SDK/apksigner" verify --print-certs dist/LiquidTab-2.1.5-release.apk
           ls -lh dist
 
       - name: Upload artifact
@@ -69,68 +69,90 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v2.1.4
-          name: LiquidTab 2.1.4（fork：掌盟/小黑盒专属适配 + 微信聊天页底部修复）
+          tag_name: v2.1.5
+          name: LiquidTab 2.1.5（fork：掌盟界面恢复 + 小黑盒发布键图标与沉浸）
           body: |
-            ## LiquidTab 2.1.4（Yuxiximyxx fork）
+            ## LiquidTab 2.1.5（Yuxiximyxx fork）
 
-            versionName 2.1.4 / versionCode 227。基线仍为 upstream
-            tag v2.1.2 + fork 适配，证书与 2.0.1–2.1.3 相同，
-            可直接覆盖升级。本版处理 2.1.3 真机复验的四项问题，
+            versionName 2.1.5 / versionCode 228。基线仍为 upstream
+            tag v2.1.2 + fork 适配，证书与 2.0.1–2.1.4 相同，
+            可直接覆盖升级。本版修 2.1.4 真机复验的三项问题，
             **均为代码层修复，未经真机验证**：
 
-            ### 1. 掌盟 / 小黑盒去黑背景
+            ### 1. 掌盟界面恢复（2.1.4 回归，优先项）
 
-            两应用升为专属适配器（QtlAdapter / HeyboxAdapter），
-            在 suppress 阶段清掉整个底栏装配的原生底色：掌盟清
-            容器、文字行、加号按钮及向上三层底部壳层；小黑盒清
-            rg_main 与重叠的阴影薄层，并放开 fl_container 的
-            ABOVE 规则让内容铺到屏幕底部，玻璃条直接浮在内容上。
+            根因：2.1.4 的 QtlAdapter 往上三层找「含加号按钮的
+            容器」作导航源，在 12.10.0 上命中的是页面级大容器；
+            共享管线会把源 alpha 置 0 并按源宽等分切片投影，
+            于是整页被隐藏、槽位里画的是整页微缩图（与真机
+            截图一致）。
 
-            ### 2. 掌盟 / 小黑盒修按钮偏移
+            修法：
+            - 源严格限制为底栏壳层：候选祖先必须高度 ≤168dp
+              且底边与文字行底边对齐（≤12dp），选不到就退回
+              文字行本身；
+            - acceptsNavigationSource 增加高度兜底（>200dp
+              直接拒绝），任何发现路径都选不出页面级容器；
+            - 不再放开内容区 RelativeLayout ABOVE 规则、不再
+              清祖先链背景；去黑带只清底栏装配自身底色加安装
+              器对直接父壳层的通用处理。**若真机上黑带仍有
+              残留，是为保界面完整的主动取舍，后续再议；**
+            - artwork 改逐 tab 叶子捕获：每个 tab 只取内部
+              真实图标（ImageView / 顶部 compound drawable）
+              与文字，加号槽画原生按钮本体，不再用容器切片。
 
-            - 掌盟：源钉死为同时含 tab_title_content 与
-              bottom_title_center_btn 的底栏容器；加号按钮不在
-              源内时移入容器；中间槽位走 sourceCenter 裁剪
-              （美团同款参数）；点按按槽位映射到真实视图转发。
-            - 小黑盒：源钉死为 rg_main；把独立于 RadioGroup 的
-              加号按钮 vg_mid_tab 移入 rg_main 顶替 rb_3 占位
-              并继承其布局参数（重绑时复查，防底栏热更新挂回），
-              五个槽位的 artwork/点按/显隐回到同一索引空间。
+            把握程度：根因链（选源过大 → alpha 置 0 → 整页
+            隐藏；等分切片 → 微缩图入槽）已在共享管线代码中
+            逐环坐实，修复针对每一环，界面恢复的把握较大；
+            但宿主 12.10.0 的真实层级未经真机探针，最终以
+            真机为准。
 
-            ### 3. 掌盟 / 小黑盒接上游现成机制
+            ### 2. 小黑盒发布按钮补图标
 
-            复用上游 2.1.2 已有机制，不另造系统：两应用
-            defaultDetachedPublish = true 并在适配器实现
-            barLayout（tieba/xhs 同款几何），设置页出现
-            「独立发布键」开关且默认开启；补 entryLabels
-            （掌盟：首页/社区/发布/商城/我的；小黑盒：首页/
-            热点/发布/游戏库/我），设置页出现逐项入口开关。
-            **其它应用的发布按钮一律未动。** 注意：若 2.1.3
-            时已保存过这两应用的单应用配置，独立发布键以已存
-            配置为准，可在设置页手动打开。
+            根因：通用绘制路径从不往独立圆钮里画 artwork
+            （四个页面槽之外，发布槽不在绘制列表内；xhs/贴吧
+            均由适配器自绘发布键）。
 
-            ### 4. 微信聊天页底部过高
+            修法：HeyboxAdapter 自持绘制
+            （ownsNavigationDrawing），通用投影之后把
+            vg_mid_tab 内部的图标叶子（ImageView）画进圆钮；
+            取不到图标时手绘加号兜底，圆钮不再空白。快照
+            同步改逐槽叶子捕获：普通槽取 RadioButton 顶部
+            compound drawable + 文本（与 BetterHeybox 构建
+            底栏的取图方式一致），中间槽取 vg_mid_tab 图标
+            叶子。
 
-            根因：模块沉浸使微信窗口 edge-to-edge 后，现行微信
-            已自行给 ChatFooter 加了导航条高度的内边距，上游
-            WeChatChatInsets 又补了一整份导航高度的底部 padding
-            并绘色带，等于重复预留一条。修法（仅动微信适配内
-            WeChatChatInsets）：计算附加 padding 时先扣除
-            ChatFooter 已自带的底部内边距（其 paddingBottom
-            或其下方间隙），不再重复叠加。微信主界面玻璃条
-            路径未动。
+            ### 3. 小黑盒导航条沉浸
+
+            共享安装器只做到窗口标志与导航条颜色透明，宿主
+            根布局仍按 navigationBars inset 留底，玻璃条下
+            留实色带。本版在适配器 configureNavigationInsets
+            中（照本仓 CainiaoInsets 成法）对含 rg_main 的
+            主界面窗口把导航条底部 inset 清零，内容铺到物理
+            底部；其它页面不做，避免破坏依赖该 inset 的布局
+            （与 BetterHeybox 只在主界面全量沉浸的口径一致）。
+
+            ### 附带核对：小黑盒四个 tab 的几何形图标
+
+            2.1.4 截图中四槽图标为三角/圆/叉/方块。本版捕获
+            已改为直接取 RadioButton 的顶部 compound
+            drawable——宿主真图标的权威来源，BetterHeybox
+            同款取法。若装 2.1.5 后仍是几何形，则说明宿主
+            当前下发的 compound drawable 本身即为该组图形
+            （图标由服务端热更新下发，未到达或回退默认时
+            可能如此），下一步需在真机上关模块作用域、同屏
+            对照原生底栏确认，不要再从模块侧猜。
 
             ### 复验方法
 
-            - 掌盟：强停重开，首页底栏应无黑带、图标居中；
-              设置页（模块内掌盟条目）应有「独立发布键」与
-              五个入口开关，发布键默认独立在右。
-            - 小黑盒：同上；另注意中间发布键点按应能打开
-              发布动作，切换 tab 应正常跟随。
-            - 微信：进任意聊天页，输入框下方应只剩正常高度
-              （约一条手势区），不再多出一条空黑带；回主界面
-              四个 tab 的玻璃条应无变化。
+            - 掌盟：强停重开，首页内容应完整显示，玻璃条浮
+              在底部、图标为各 tab 真图标；发布键圆钮内应有
+              原生加号按钮。
+            - 小黑盒：强停重开，玻璃条下方不应再有实色带、
+              内容应铺到屏幕底部；独立发布键圆钮内应有发布
+              图标；四槽图标对照原生底栏看是否一致。
+            - 微信：2.1.4 的聊天页修复未动，进聊天页确认
+              底部高度无回归。
 
             ### 注意
 

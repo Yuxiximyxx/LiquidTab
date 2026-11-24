@@ -1,0 +1,275 @@
+package io.github.offlineglass.hook.adapters.qtl
+
+import android.graphics.Bitmap
+import android.graphics.BlendMode
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.Path
+import android.graphics.drawable.Drawable
+import android.text.TextPaint
+import android.view.View
+import android.view.ViewGroup
+import android.widget.ImageView
+import android.widget.TextView
+import io.github.offlineglass.hook.GlassHostLayout
+import io.github.offlineglass.hook.adapters.AdapterNavigationFrame
+import io.github.offlineglass.hook.adapters.AppNavigationState
+import kotlin.math.min
+
+/**
+ * 掌盟的导航绘制状态。
+ *
+ * artwork 口径 (2.1.5): 共享管线把源位图按宽度等分切片投影到
+ * 槽位, 源里任何大视图都会被缩进槽位 (2.1.4 槽位里的整页微缩
+ * 图即此机制)。故快照改走逐 tab 叶子捕获: 每个 tab 只取它内部
+ * 真实的图标 (ImageView 或 TextView 顶部 compound drawable) 与
+ * 文字, 按原生尺寸摆进对应槽位; 中间槽画加号按钮本体。
+ *
+ * 独立发布键圆钮同理: 通用路径从不往圆钮里画 artwork
+ * (enabledNavigationIndices 只含四个页面槽), 由 draw() 在通用
+ * 投影之后把原生加号按钮本体画进圆钮, 找不到时手绘加号兜底
+ * (贴吧同款), 保证圆钮永不空白。
+ */
+internal class QtlNavigationState(private val host: GlassHostLayout) : AppNavigationState {
+
+    override fun captureNavigation(source: ViewGroup, target: Bitmap): Boolean =
+        QtlArtworkCapture.capture(source, target)
+
+    override fun draw(canvas: Canvas, frame: AdapterNavigationFrame) {
+        host.drawOriginalNavigationForAdapter(canvas, frame.extraScale)
+        drawPublish(canvas, frame)
+    }
+
+    private fun drawPublish(canvas: Canvas, frame: AdapterNavigationFrame) {
+        val layout = frame.barLayout ?: return
+        val cx = layout.actionLeft + layout.actionSize / 2f
+        val cy = frame.height / 2f
+        val radius = layout.actionSize / 2f
+        val button = host.navigationSource?.let { QtlViews.findCenterButton(it) }
+        var drawn = false
+        if (button != null && button.width > 0 && button.height > 0) {
+            canvas.save()
+            canvas.clipPath(Path().apply { addCircle(cx, cy, radius, Path.Direction.CW) })
+            drawn = QtlViews.drawLeafCentered(
+                canvas, button, cx, cy, radius * 1.84f,
+            )
+            canvas.restore()
+        }
+        if (!drawn) {
+            // 兜底手绘加号, 圆钮永不空白。
+            val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                style = Paint.Style.STROKE
+                strokeCap = Paint.Cap.ROUND
+                strokeWidth = 2.2f * frame.density
+                color = if (frame.darkGlass) Color.WHITE else Color.rgb(40, 40, 40)
+            }
+            val arm = 7f * frame.density
+            canvas.drawLine(cx - arm, cy, cx + arm, cy, paint)
+            canvas.drawLine(cx, cy - arm, cx, cy + arm, paint)
+        }
+    }
+}
+
+/** qtl 适配内共用的视图查找/叶子绘制小工具。 */
+internal object QtlViews {
+    const val TAB_ROW_ID = "tab_title_content"
+    const val CENTER_BUTTON_ID = "bottom_title_center_btn"
+
+    fun entryName(view: View): String? = runCatching {
+        if (view.id == View.NO_ID) null else view.resources.getResourceEntryName(view.id)
+    }.getOrNull()
+
+    fun findByEntryName(root: View, name: String): View? {
+        val stack = ArrayDeque<View>()
+        stack += root
+        var visited = 0
+        while (stack.isNotEmpty() && visited++ < 2_000) {
+            val view = stack.removeLast()
+            if (entryName(view) == name) return view
+            if (view is ViewGroup) {
+                for (index in view.childCount - 1 downTo 0) stack += view.getChildAt(index)
+            }
+        }
+        return null
+    }
+
+    fun findCenterButton(source: ViewGroup): View? =
+        findByEntryName(source, CENTER_BUTTON_ID)
+            ?: source.rootView?.let { findByEntryName(it, CENTER_BUTTON_ID) }
+
+    /**
+     * 把叶子视图按自身尺寸 (必要时等比缩小到 maxSize) 画到
+     * (cx, cy) 中心。返回是否真的画出内容。
+     */
+    fun drawLeafCentered(canvas: Canvas, view: View, cx: Float, cy: Float, maxSize: Float): Boolean {
+        if (view.width <= 0 || view.height <= 0) return false
+        val scale = min(1f, maxSize / maxOf(view.width, view.height).toFloat())
+        val savedAlpha = view.alpha
+        canvas.save()
+        canvas.translate(cx - view.width * scale / 2f, cy - view.height * scale / 2f)
+        canvas.scale(scale, scale)
+        // 叶子自身 alpha 多为 1; 宿主把源 alpha 置 0 不影响叶子
+        // 本地绘制。极少数叶子 alpha 近 0 时临时置 1 再恢复。
+        if (savedAlpha < 0.01f) view.alpha = 1f
+        runCatching { view.draw(canvas) }
+        if (savedAlpha < 0.01f) view.alpha = savedAlpha
+        canvas.restore()
+        return true
+    }
+}
+
+/** 逐 tab 叶子捕获: 见 QtlNavigationState 的类注释。 */
+internal object QtlArtworkCapture {
+    private const val SLOT_COUNT = 5
+    private const val CENTER_INDEX = 2
+
+    private class TabArt(
+        val iconView: ImageView?,
+        val iconDrawable: Drawable?,
+        val stateView: View?,
+        val label: TextView?,
+    )
+
+    fun capture(source: ViewGroup, target: Bitmap): Boolean {
+        val row = QtlViews.findByEntryName(source, QtlViews.TAB_ROW_ID) as? ViewGroup
+            ?: return false
+        val tabs = (0 until row.childCount).map(row::getChildAt)
+            .filter { it.visibility != View.GONE && hasText(it) }
+        if (tabs.size != SLOT_COUNT - 1) return false
+        val button = QtlViews.findCenterButton(source) ?: return false
+        if (button.width <= 0 || button.height <= 0) return false
+        val arts = tabs.map(::extractTabArt)
+        if (arts.any { it.label == null && it.iconView == null && it.iconDrawable == null }) {
+            return false
+        }
+        val canvas = Canvas(target)
+        canvas.drawColor(Color.TRANSPARENT, BlendMode.CLEAR)
+        val slotWidth = target.width / SLOT_COUNT.toFloat()
+        val density = source.resources.displayMetrics.density
+        arts.forEachIndexed { ordinal, art ->
+            val slot = if (ordinal < CENTER_INDEX) ordinal else ordinal + 1
+            drawTab(canvas, art, (slot + 0.5f) * slotWidth, slotWidth, target.height, density)
+        }
+        QtlViews.drawLeafCentered(
+            canvas, button, (CENTER_INDEX + 0.5f) * slotWidth, target.height / 2f,
+            min(slotWidth, target.height.toFloat()) * 0.92f,
+        )
+        return true
+    }
+
+    private fun extractTabArt(unit: View): TabArt {
+        var label: TextView? = null
+        var iconView: ImageView? = null
+        var iconDrawable: Drawable? = null
+        var stateView: View? = null
+        if (unit is TextView) {
+            if (!unit.text.isNullOrBlank()) label = unit
+            val top = unit.compoundDrawables.getOrNull(1)
+                ?: unit.compoundDrawablesRelative.getOrNull(1)
+            if (top != null) {
+                iconDrawable = top
+                stateView = unit
+            }
+        }
+        // 深度优先找第一个带 drawable 的 ImageView 作图标叶子。
+        if (iconView == null && iconDrawable == null) {
+            val stack = ArrayDeque<View>()
+            stack += unit
+            while (stack.isNotEmpty()) {
+                val view = stack.removeLast()
+                if (view is ImageView && view.drawable != null && view.width > 0) {
+                    iconView = view
+                    break
+                }
+                if (view is ViewGroup) {
+                    for (index in view.childCount - 1 downTo 0) stack += view.getChildAt(index)
+                }
+            }
+        }
+        if (label == null) {
+            val stack = ArrayDeque<View>()
+            stack += unit
+            while (stack.isNotEmpty()) {
+                val view = stack.removeLast()
+                if (view is TextView && !view.text.isNullOrBlank()) {
+                    label = view
+                    break
+                }
+                if (view is ViewGroup) {
+                    for (index in view.childCount - 1 downTo 0) stack += view.getChildAt(index)
+                }
+            }
+        }
+        return TabArt(iconView, iconDrawable, stateView, label)
+    }
+
+    private fun drawTab(
+        canvas: Canvas, art: TabArt, centerX: Float, slotWidth: Float,
+        targetHeight: Int, density: Float,
+    ) {
+        val iconHeight = when {
+            art.iconView != null -> art.iconView.height.toFloat()
+            art.iconDrawable != null -> (art.iconDrawable.intrinsicHeight.takeIf { it > 0 }
+                ?: art.iconDrawable.bounds.height()).toFloat()
+            else -> 0f
+        }
+        val label = art.label
+        val paint = label?.let {
+            TextPaint(it.paint).apply {
+                color = it.currentTextColor
+                textAlign = Paint.Align.CENTER
+            }
+        }
+        val metrics = paint?.fontMetrics
+        val labelHeight = if (paint != null && metrics != null) metrics.descent - metrics.ascent else 0f
+        val gap = if (iconHeight > 0f && labelHeight > 0f) 2f * density else 0f
+        val total = iconHeight + gap + labelHeight
+        var top = (targetHeight - total) / 2f
+        // 图标
+        when {
+            art.iconView != null -> {
+                QtlViews.drawLeafCentered(
+                    canvas, art.iconView, centerX, top + iconHeight / 2f, slotWidth * 0.92f,
+                )
+            }
+            art.iconDrawable != null -> {
+                val drawable = art.iconDrawable
+                val width = (drawable.intrinsicWidth.takeIf { it > 0 }
+                    ?: drawable.bounds.width()).toFloat()
+                val savedBounds = android.graphics.Rect(drawable.bounds)
+                val savedState = drawable.state
+                if (art.stateView != null) drawable.state = art.stateView.drawableState
+                canvas.save()
+                canvas.clipRect(centerX - slotWidth / 2f, 0f, centerX + slotWidth / 2f, targetHeight.toFloat())
+                drawable.setBounds(
+                    (centerX - width / 2f).toInt(), top.toInt(),
+                    (centerX + width / 2f).toInt(), (top + iconHeight).toInt(),
+                )
+                drawable.draw(canvas)
+                canvas.restore()
+                drawable.bounds = savedBounds
+                drawable.state = savedState
+            }
+        }
+        top += iconHeight + gap
+        // 文字: 只画文本本身, 不画 TextView 的背景/复合图。
+        if (label != null && paint != null && metrics != null) {
+            val text = label.text?.toString().orEmpty()
+            if (text.isNotEmpty()) {
+                canvas.drawText(text, centerX, top - metrics.ascent, paint)
+            }
+        }
+    }
+
+    private fun hasText(view: View): Boolean {
+        if (view is TextView) return !view.text.isNullOrBlank()
+        if (view is ViewGroup) {
+            for (index in 0 until view.childCount) {
+                if (hasText(view.getChildAt(index))) return true
+            }
+        }
+        return false
+    }
+
+}

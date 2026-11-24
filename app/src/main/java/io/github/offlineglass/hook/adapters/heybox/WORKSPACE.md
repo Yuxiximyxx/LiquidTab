@@ -30,4 +30,21 @@
 - 冲突提醒：启用本模块的小黑盒玻璃后，需关掉 BetterHeybox（独立版或
   荣耀工具箱内「小黑盒增强」）自带的液态玻璃底栏开关，避免同一底栏
   被处理两次。注意工具箱 v1.10.0 起已移除其小黑盒底栏功能。
-- 状态：2.1.4 已发布待验，以上均为代码层修复，未经真机验证。
+- 2.1.5 的修正（2.1.4 真机复验：发布键无图标、导航条不沉浸）：
+  - 发布键空白根因：通用绘制路径从不往独立圆钮画 artwork
+    （页面槽之外的发布槽不在绘制列表；xhs/贴吧均适配器自绘）。
+    本版 `HeyboxNavigationState` 自持绘制（`ownsNavigationDrawing`），
+    通用投影后把 `vg_mid_tab` 的图标叶子画进圆钮，兜底手绘加号；
+  - 快照改逐槽叶子捕获（`HeyboxArtworkCapture`）：普通槽取
+    RadioButton 顶部 compound drawable（带按钮 drawableState）
+    + 文本，中间槽取 `vg_mid_tab` 图标叶子；
+  - 沉浸：`configureNavigationInsets` 接 `HeyboxInsets`（照本仓
+    CainiaoInsets 成法），对含 `rg_main` 的主界面窗口在 insets
+    分发处清零导航条底部 inset，内容铺到物理底部；其余页面
+    不动（BetterHeybox 亦只在主界面全量沉浸）。
+  - 附带核对：2.1.4 截图四槽图标为三角/圆/叉/方块等几何形；
+    本版已改为直接取 compound drawable 这一权威来源，若真机
+    仍为几何形，则宿主当前下发的 drawable 本身即该组图形
+    （服务端热更新图标未到达/回退默认），需关作用域对照原生
+    底栏确认，不要再从模块侧猜。
+- 状态：2.1.5 已发布待验，以上均为代码层修复，未经真机验证。

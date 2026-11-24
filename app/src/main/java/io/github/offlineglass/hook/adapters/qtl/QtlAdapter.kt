@@ -1,14 +1,16 @@
 package io.github.offlineglass.hook.adapters.qtl
 
+import android.content.Context
 import android.graphics.Color
 import android.graphics.drawable.ColorDrawable
 import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
-import android.widget.RelativeLayout
 import io.github.offlineglass.config.GlassConfig
+import io.github.offlineglass.hook.GlassHostLayout
 import io.github.offlineglass.hook.NavigationCandidate
 import io.github.offlineglass.hook.adapters.AdapterBarLayout
+import io.github.offlineglass.hook.adapters.AppNavigationState
 import io.github.offlineglass.hook.adapters.TargetAdapter
 import io.github.offlineglass.targets.TargetSpec
 
@@ -16,12 +18,19 @@ import io.github.offlineglass.targets.TargetSpec
  * 掌上英雄联盟 (com.tencent.qt.qtl) 专属适配。
  *
  * 宿主结构 (来自 PalmPurify 对 12.9.0 的定位, 12.10.0 沿用资源名):
- * 首页 GameHomeActivity; 底栏容器内含文字行 `tab_title_content`
- * (LinearLayout, 子项为各 tab, 中间留发布位) 与中间加号按钮
- * `bottom_title_center_btn`。通用发现时代的问题: 选中的源不稳定、
- * 加号按钮在源外单独绘制透过半透明玻璃发糊、容器黑背景留在
- * 玻璃条后面。本适配把源钉死为底栏容器, 并在 suppress 阶段
- * 清掉整条底栏装配的原生底色。
+ * 首页 GameHomeActivity; 底栏文字行 `tab_title_content`
+ * (子项为各 tab, 中间留发布位), 中间加号按钮
+ * `bottom_title_center_btn` 挂在更高层。
+ *
+ * 2.1.4 真机回归 (整页空白) 的教训: 旧 findNavigation 往上三层
+ * 找「含加号按钮的容器」作源, 在 12.10.0 上命中的是页面级大
+ * 容器。共享管线对源做两件事: 安装时把源 alpha 置 0, 前景按
+ * 源宽等分切片投影——源一旦是页面容器, 整页被隐藏, 且每个
+ * 槽位里画的是整页微缩图 (真机截图实证)。本版 (2.1.5):
+ * 源严格限制为底栏尺寸的壳层 (高度与底边对齐双校验), 选不到
+ * 就退回文字行本身; acceptsNavigationSource 再做高度兜底;
+ * 内容布局 (RelativeLayout ABOVE 规则) 与祖先链背景一律不再
+ * 触碰, 去黑带只靠清源自身底色 + 安装器对直接父壳层的处理。
  */
 internal object QtlAdapter : TargetAdapter {
     override val key = "qtl"
@@ -35,23 +44,60 @@ internal object QtlAdapter : TargetAdapter {
     override val sourceCenterTranslationDp = -2f
     override val sourceCenterClipRatio = 0.7f
 
+    // 独立发布键的圆钮没有任何通用路径绘制 artwork (xhs/贴吧
+    // 均自绘), 故本适配自持绘制: 通用投影 + 原生加号按钮本体。
+    override val ownsNavigationDrawing = true
+
+    override fun createNavigationState(context: Context, host: GlassHostLayout): AppNavigationState =
+        QtlNavigationState(host)
+
     override fun findNavigation(root: View, spec: TargetSpec): NavigationCandidate? {
         val row = findByEntryName(root, TAB_ROW_ID) as? ViewGroup ?: return null
         if (!row.isShown || row.width <= 0 || row.height <= 0) return null
-        // 优先取同时包含加号按钮的底栏容器作为源, 使五个槽位的
-        //  artwork 都在源内; 找不到时退回文字行本身。
-        var candidate: ViewGroup = row
+        val density = root.resources.displayMetrics.density
+        // 首选: 同时含加号按钮、且尺寸确实是底栏壳层的祖先。
         var parent = row.parent as? ViewGroup
         var depth = 0
         while (parent != null && depth < 3) {
-            if (findByEntryName(parent, CENTER_BUTTON_ID) != null) {
-                candidate = parent
-                break
+            if (isBarShell(parent, row, density) &&
+                findByEntryName(parent, CENTER_BUTTON_ID) != null
+            ) {
+                return NavigationCandidate(parent, SLOT_COUNT, 1_000)
             }
             parent = parent.parent as? ViewGroup
             depth++
         }
-        return NavigationCandidate(candidate, SLOT_COUNT, 1_000)
+        // 次选: 文字行的直接父容器 (底栏壳层; 加号按钮在外层,
+        // 由 prepareNavigationSource 移入)。
+        val direct = row.parent as? ViewGroup
+        if (direct != null && isBarShell(direct, row, density)) {
+            return NavigationCandidate(direct, SLOT_COUNT, 1_000)
+        }
+        // 兜底: 文字行本身, 保证源永远只是底栏。
+        return NavigationCandidate(row, SLOT_COUNT, 1_000)
+    }
+
+    override fun acceptsNavigationSource(navigation: ViewGroup): Boolean {
+        // 兜底防线: 任何发现路径给出的源只要高得不像底栏就拒绝,
+        // 杜绝页面级容器再被当源隐藏 (2.1.4 回归的直接原因)。
+        if (navigation.height <= 0) return true // 未布局时不拦, 安装前已布局完成
+        val density = navigation.resources.displayMetrics.density
+        return navigation.height <= (200f * density).toInt()
+    }
+
+    /** 底栏壳层校验: 高度在底栏量级, 且底边与文字行底边基本对齐。 */
+    private fun isBarShell(candidate: ViewGroup, row: ViewGroup, density: Float): Boolean {
+        if (candidate === row) return false
+        val maxHeight = (168f * density).toInt()
+        if (candidate.height !in 1..maxHeight) return false
+        if (candidate.height < row.height) return false
+        if (candidate.width < row.width * 0.9f) return false
+        val candidateLoc = IntArray(2).also(candidate::getLocationInWindow)
+        val rowLoc = IntArray(2).also(row::getLocationInWindow)
+        val bottomDelta = kotlin.math.abs(
+            (candidateLoc[1] + candidate.height) - (rowLoc[1] + row.height),
+        )
+        return bottomDelta <= (12f * density).toInt()
     }
 
     override fun estimateSlotCount(group: ViewGroup, spec: TargetSpec): Int? {
@@ -86,7 +132,8 @@ internal object QtlAdapter : TargetAdapter {
 
     override fun prepareNavigationSource(navigation: ViewGroup, density: Float) {
         // 加号按钮若不在源内 (个别版本挂在根布局上), 移入底栏
-        // 容器, 否则它会在玻璃条后面单独绘制透出来。
+        // 容器, 否则它会在玻璃条后面单独绘制透出来。源已经过
+        // findNavigation 的底栏尺寸校验, 移入目标只会是底栏壳层。
         runCatching {
             val root = navigation.rootView ?: return
             val button = findByEntryName(root, CENTER_BUTTON_ID) ?: return
@@ -116,20 +163,13 @@ internal object QtlAdapter : TargetAdapter {
         stripChrome(navigation)
 
     private fun stripChrome(navigation: ViewGroup) {
+        // 只清底栏装配自身 (源/文字行/加号按钮) 的底色。祖先链
+        // 背景与内容布局不再触碰: 直接父壳层的底色由安装器的
+        // 通用逻辑处理 (父高 ≤196dp 时清背景), 足够去黑带,
+        // 且不会误伤页面 (2.1.5 口径: 界面完整优先于去黑带)。
         clearChrome(navigation)
         findByEntryName(navigation, TAB_ROW_ID)?.let { clearChrome(it) }
         findByEntryName(navigation, CENTER_BUTTON_ID)?.let { clearChrome(it) }
-        // 底栏容器往上的壳层 (高度不大的底部容器) 一并清掉底色,
-        // 避免玻璃条后面留一条宿主黑带。
-        var parent = navigation.parent as? View
-        var depth = 0
-        val density = navigation.resources.displayMetrics.density
-        while (parent != null && depth < 3) {
-            if (parent.height in 1..(196f * density).toInt()) clearChrome(parent)
-            parent = parent.parent as? View
-            depth++
-        }
-        extendContentUnderBar(navigation)
     }
 
     override fun dispatchNavigationTap(source: ViewGroup?, index: Int, slotCount: Int): Boolean {
@@ -152,23 +192,6 @@ internal object QtlAdapter : TargetAdapter {
         val ordinal = if (index < CENTER_INDEX) index else index - 1
         val target = tabs.getOrNull(ordinal) ?: return false
         return runCatching { target.performClick() }.getOrDefault(false)
-    }
-
-    /** 内容若被 RelativeLayout 的 ABOVE 规则顶在底栏上方, 放开规则让内容铺到屏幕底部 (华为健康适配同款处理)。 */
-    private fun extendContentUnderBar(navigation: ViewGroup) {
-        runCatching {
-            val parent = navigation.parent as? ViewGroup ?: return
-            if (parent !is RelativeLayout || navigation.id == View.NO_ID) return
-            for (index in 0 until parent.childCount) {
-                val sibling = parent.getChildAt(index)
-                if (sibling === navigation) continue
-                val params = sibling.layoutParams as? RelativeLayout.LayoutParams ?: continue
-                if (params.rules[RelativeLayout.ABOVE] == navigation.id) {
-                    params.removeRule(RelativeLayout.ABOVE)
-                    sibling.layoutParams = params
-                }
-            }
-        }
     }
 
     private fun clearChrome(view: View) {
