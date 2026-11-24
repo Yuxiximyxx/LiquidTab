@@ -36,6 +36,14 @@ import io.github.offlineglass.targets.TargetSpec
  * 并置 INVISIBLE (见 hideLeakedCenterButton); 点按改走捕获
  * 时记录的槽位身份绑定 + 强送达 (见 QtlSlotBindings 与
  * deliverClick), 不再按下标记数、也不落回宿主通用兜底。
+ *
+ * 2.1.7: ①玻璃条后的主题色带是原底栏容器背景 (浅色白/夜间
+ * 黑), 在 suppress 时按几何守卫逐层清到那一层 (见
+ * stripBarContainers); ②选中漂移与后两 tab 卡顿: 选中改由
+ * QtlNavigationState.resolveSelectedIndex 以宿主真实选中态
+ * 为准 (宿主通用判定按子视图下标打分、跳不过发布槽),
+ * 点按加一级「只分发给文字行」的合成触摸快路径; ③独立圆钮
+ * 摘掉本地光学三标志, 字段集与 xhs 对齐 (见 barLayout)。
  */
 internal object QtlAdapter : TargetAdapter {
     override val key = "qtl"
@@ -122,6 +130,11 @@ internal object QtlAdapter : TargetAdapter {
         val navigation = listOf(0, 1, 3, 4).filter { config.hiddenMask and (1 shl it) == 0 }
         if (navigation.isEmpty()) return null
         val actionLeft = (width - height).toFloat()
+        // 光学字段集与 xhs/小黑盒 (2.1.6) 对齐: 不开本地光学。
+        // 本地光学的采样节点按 padded 区域录制, 圆钮周围会多出
+        // 一圈浅色底板 (2.1.6 掌盟截图里圆钮外的大号白色圆盘),
+        // 且主条底板横跨间隙与圆钮粘连; 走共享外层玻璃路径后
+        // 两部分各自成形 (2.1.7)。
         return AdapterBarLayout(
             mainWidth = actionLeft - gap,
             actionLeft = actionLeft,
@@ -129,9 +142,6 @@ internal object QtlAdapter : TargetAdapter {
             actionIndex = CENTER_INDEX,
             navigationIndices = navigation,
             actionHighlightScale = 0.35f,
-            localActionOptics = true,
-            localMainOptics = true,
-            actionFillUsesOnlySurfaceOpacity = true,
         )
     }
 
@@ -168,14 +178,51 @@ internal object QtlAdapter : TargetAdapter {
         stripChrome(navigation)
 
     private fun stripChrome(navigation: ViewGroup) {
-        // 只清底栏装配自身 (源/文字行/加号按钮) 的底色。祖先链
-        // 背景与内容布局不再触碰: 直接父壳层的底色由安装器的
-        // 通用逻辑处理 (父高 ≤196dp 时清背景), 足够去黑带,
-        // 且不会误伤页面 (2.1.5 口径: 界面完整优先于去黑带)。
+        // 清底栏装配自身 (源/文字行/加号按钮) 的底色, 再清原底栏
+        // 容器那一层 (见 stripBarContainers)。内容布局一律不碰。
         clearChrome(navigation)
         findByEntryName(navigation, TAB_ROW_ID)?.let { clearChrome(it) }
         findByEntryName(navigation, CENTER_BUTTON_ID)?.let { clearChrome(it) }
         hideLeakedCenterButton(navigation)
+        stripBarContainers(navigation)
+    }
+
+    /**
+     * 清原底栏容器的主题背景 (2.1.7)。
+     *
+     * 2.1.6 后真机仍报玻璃条后有一条背景带, 且经小乐定性: 浅色
+     * 模式下是白色、夜间是黑色, 随主题变色——即宿主原底栏容器
+     * 的背景本身, 不是任何黑色物件。它是全宽容器, 玻璃条比它
+     * 窄、且位置偏高, 容器背景便从玻璃条右后方与间隙处露出来
+     * (间隙里看到的「白色连接」也是它)。安装器的通用逻辑只清
+     * 源的直接父层 (≤196dp), 这层容器在更外层, 一直漏网。
+     *
+     * 这里从源逐层向上 (至多 3 层), 只清同时满足「底边与文字
+     * 行底边基本对齐 (≤20dp)、高度在底栏量级 (≤260dp)、宽度
+     * 不小于文字行」的祖先——即底栏区域容器本身; 任一层不合
+     * 格立即停 (页面级容器高度远超上限, 绝不会被清到), 不改
+     * 任何布局参数, 界面完整优先的红线不变。
+     */
+    private fun stripBarContainers(navigation: ViewGroup) {
+        runCatching {
+            val row = findByEntryName(navigation, TAB_ROW_ID) ?: navigation
+            val density = navigation.resources.displayMetrics.density
+            val rowLoc = IntArray(2).also(row::getLocationInWindow)
+            val rowBottom = rowLoc[1] + row.height
+            var current = navigation.parent as? ViewGroup
+            var depth = 0
+            while (current != null && depth < 3) {
+                val loc = IntArray(2).also(current::getLocationInWindow)
+                val bottomDelta = kotlin.math.abs((loc[1] + current.height) - rowBottom)
+                val qualifies = current.height in 1..(260f * density).toInt() &&
+                    bottomDelta <= (20f * density).toInt() &&
+                    current.width >= row.width
+                if (!qualifies) break
+                clearChrome(current)
+                current = current.parent as? ViewGroup
+                depth++
+            }
+        }
     }
 
     /**
@@ -225,19 +272,54 @@ internal object QtlAdapter : TargetAdapter {
 
     /**
      * 把点按真正送达目标视图, 绝不落回宿主通用兜底路径 (它按
-     * 原始下标取子视图, 正是发布槽后偏一位的来源)。三级递进:
-     * 目标自身有监听 → performClick; 否则深度优先找它内部带
-     * 监听的子视图 (闲鱼适配同款); 再否则在目标中心合成一对
-     * DOWN/UP 触摸、从窗口根部分发, 交给宿主自己的命中分发
-     * (行级触摸监听也能接住)。合成触摸已按目标本体坐标投递
-     * 时即视为送达, 返回 true 防止宿主再按下标重复处理。
+     * 原始下标取子视图, 正是发布槽后偏一位的来源)。四级递进:
+     * 目标自身有监听 → performClick; 否则在目标中心合成一对
+     * DOWN/UP 触摸、直接分发给目标的父容器 (文字行)——由宿主
+     * 自己的命中分发决定落点, 与真实手指点按同路, 且分发范围
+     * 只限一行, 不必全窗遍历 (2.1.7: 后两槽此前走到全窗根分发
+     * 与 200 视图 DFS 两条慢路径, 切换明显卡顿); 再否则深度
+     * 优先找它内部带监听的子视图 (闲鱼适配同款); 最后才从
+     * 窗口根部分发合成触摸。任一级按目标本体坐标投递成功即
+     * 视为送达, 返回 true 防止宿主再按下标重复处理。
      */
     private fun deliverClick(target: View): Boolean {
         if (runCatching { target.hasOnClickListeners() && target.performClick() }
                 .getOrDefault(false)
         ) return true
+        if (synthesizeTapOnParent(target)) return true
         if (clickDescendantWithListener(target)) return true
         return synthesizeTap(target)
+    }
+
+    /** 在目标中心合成触摸, 只分发给目标的直接父容器 (文字行)。 */
+    private fun synthesizeTapOnParent(target: View): Boolean {
+        val parent = target.parent as? ViewGroup ?: return false
+        if (!target.isAttachedToWindow || target.width <= 0 || target.height <= 0) return false
+        return runCatching {
+            val targetLoc = IntArray(2).also(target::getLocationInWindow)
+            val parentLoc = IntArray(2).also(parent::getLocationInWindow)
+            val x = targetLoc[0] - parentLoc[0] + target.width / 2f
+            val y = targetLoc[1] - parentLoc[1] + target.height / 2f
+            dispatchTap(parent, x, y)
+        }.getOrDefault(false)
+    }
+
+    private fun dispatchTap(recipient: View, x: Float, y: Float): Boolean {
+        val now = android.os.SystemClock.uptimeMillis()
+        val down = android.view.MotionEvent.obtain(
+            now, now, android.view.MotionEvent.ACTION_DOWN, x, y, 0,
+        )
+        val up = android.view.MotionEvent.obtain(
+            now, now + 48L, android.view.MotionEvent.ACTION_UP, x, y, 0,
+        )
+        return try {
+            recipient.dispatchTouchEvent(down)
+            recipient.dispatchTouchEvent(up)
+            true
+        } finally {
+            down.recycle()
+            up.recycle()
+        }
     }
 
     private fun clickDescendantWithListener(root: View): Boolean {
@@ -266,21 +348,7 @@ internal object QtlAdapter : TargetAdapter {
             val rootLoc = IntArray(2).also(root::getLocationInWindow)
             val x = (targetLoc[0] - rootLoc[0] + target.width / 2f)
             val y = (targetLoc[1] - rootLoc[1] + target.height / 2f)
-            val now = android.os.SystemClock.uptimeMillis()
-            val down = android.view.MotionEvent.obtain(
-                now, now, android.view.MotionEvent.ACTION_DOWN, x, y, 0,
-            )
-            val up = android.view.MotionEvent.obtain(
-                now, now + 48L, android.view.MotionEvent.ACTION_UP, x, y, 0,
-            )
-            try {
-                root.dispatchTouchEvent(down)
-                root.dispatchTouchEvent(up)
-            } finally {
-                down.recycle()
-                up.recycle()
-            }
-            true
+            dispatchTap(root, x, y)
         }.getOrDefault(false)
     }
 

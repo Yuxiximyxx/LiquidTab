@@ -36,6 +36,60 @@ internal class QtlNavigationState(private val host: GlassHostLayout) : AppNaviga
     override fun captureNavigation(source: ViewGroup, target: Bitmap): Boolean =
         QtlArtworkCapture.capture(source, target)
 
+    /**
+     * 选中槽位以宿主真实选中状态为准 (2.1.7)。
+     *
+     * 宿主通用判定 (GlassHostLayout.resolveSelectedFromViewState)
+     * 按「槽位容器第 i 个子视图」打分: 文字行里只有四个页面
+     * tab (加号按钮不在行内), 于是第 4 个 tab (我的, 子下标 3)
+     * 被直接当成槽位 3 (商城), 第 3 个 tab (商城, 子下标 2)
+     * 又恰与发布槽同号被跳过——真机表现为切到「我的」后高亮
+     * 自己滑到「商城」, 且判定反复纠正引发切换卡顿。这里按与
+     * 捕获/点按完全相同的口径枚举四个 tab, 逐个查其子树的真实
+     * 选中信号 (isSelected / isActivated / drawable 的
+     * state_selected), 再把 tab 序号映射回槽位序号 (发布槽
+     * 之后 +1); 查不到明确选中态时返回 null, 交回宿主判定。
+     */
+    override fun resolveSelectedIndex(source: ViewGroup?, slotCount: Int): Int? {
+        val src = source ?: return null
+        val row = QtlViews.findByEntryName(src, QtlViews.TAB_ROW_ID) as? ViewGroup
+            ?: return null
+        val tabs = (0 until row.childCount).map(row::getChildAt)
+            .filter { it.visibility != View.GONE && QtlViews.hasText(it) }
+        if (tabs.size != QtlViews.SLOT_COUNT - 1 || slotCount != QtlViews.SLOT_COUNT) return null
+        var bestOrdinal = -1
+        var bestScore = 0
+        tabs.forEachIndexed { ordinal, tab ->
+            val score = selectionScore(tab)
+            if (score > bestScore) {
+                bestScore = score
+                bestOrdinal = ordinal
+            }
+        }
+        if (bestOrdinal < 0) return null
+        return if (bestOrdinal < QtlViews.CENTER_INDEX) bestOrdinal else bestOrdinal + 1
+    }
+
+    private fun selectionScore(root: View): Int {
+        var score = 0
+        val stack = ArrayDeque<Pair<View, Int>>()
+        stack += root to 0
+        while (stack.isNotEmpty()) {
+            val (view, depth) = stack.removeLast()
+            if (view.isShown) {
+                if (view.isSelected) score += 100
+                if (view.isActivated) score += 80
+                if (view.drawableState.contains(android.R.attr.state_selected)) score += 60
+            }
+            if (view is ViewGroup && depth < 6) {
+                for (index in 0 until view.childCount) {
+                    stack += view.getChildAt(index) to (depth + 1)
+                }
+            }
+        }
+        return score
+    }
+
     override fun draw(canvas: Canvas, frame: AdapterNavigationFrame) {
         host.drawOriginalNavigationForAdapter(canvas, frame.extraScale)
         drawPublish(canvas, frame)
@@ -75,6 +129,18 @@ internal class QtlNavigationState(private val host: GlassHostLayout) : AppNaviga
 internal object QtlViews {
     const val TAB_ROW_ID = "tab_title_content"
     const val CENTER_BUTTON_ID = "bottom_title_center_btn"
+    const val SLOT_COUNT = 5
+    const val CENTER_INDEX = 2
+
+    fun hasText(view: View): Boolean {
+        if (view is TextView) return !view.text.isNullOrBlank()
+        if (view is ViewGroup) {
+            for (index in 0 until view.childCount) {
+                if (hasText(view.getChildAt(index))) return true
+            }
+        }
+        return false
+    }
 
     fun entryName(view: View): String? = runCatching {
         if (view.id == View.NO_ID) null else view.resources.getResourceEntryName(view.id)

@@ -48,3 +48,19 @@
   + deliverClick 强送达（自身监听→子视图监听→目标中心合成
   触摸），不再落回通用路径。entryLabels 第二项修正为「好友」。
 - 状态：2.1.6 已发布待验，以上均为代码层修复，未经真机验证。
+- 2.1.7：①底栏后的主题色带（浅色白/夜间黑）是原底栏容器
+  背景，安装器只清源的直接父层、这层在更外层漏网；
+  stripChrome 新增 stripBarContainers：从源向上至多 3 层，
+  只清底边与文字行对齐（≤20dp）、高 ≤260dp、宽 ≥ 文字行
+  的祖先，只清背景不动布局。②选中漂移：宿主通用判定按槽位
+  容器子下标打分，跳不过发布槽（「我的」被当槽位 3=商城）；
+  QtlNavigationState 新增 resolveSelectedIndex，按捕获同口径
+  枚举四 tab、查子树真实选中信号（isSelected/isActivated/
+  state_selected），序号映射回槽位（发布槽后 +1）。点按加
+  一级快路径：合成触摸只分发给文字行（父容器），后两槽不再
+  走全窗根分发与 200 视图 DFS 慢路径，治切换卡顿。③间隙
+  粘连：barLayout 摘掉本地光学三标志（localMainOptics/
+  localActionOptics/actionFillUsesOnlySurfaceOpacity），字段
+  集与 xhs 对齐——本地光学曾在圆钮外录出大号浅色底板；同
+  时①清掉容器背景后，间隙露出的是真实内容而非主题条带。
+- 状态：2.1.7 已发布待验，以上均为代码层修复，未经真机验证。

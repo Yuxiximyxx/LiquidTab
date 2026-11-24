@@ -12,6 +12,7 @@ import io.github.offlineglass.hook.NavigationCandidate
 import io.github.offlineglass.hook.adapters.AdapterBarLayout
 import io.github.offlineglass.hook.adapters.AppNavigationState
 import io.github.offlineglass.hook.adapters.TargetAdapter
+import io.github.offlineglass.hook.compat.callbacks.XC_LoadPackage
 import io.github.offlineglass.targets.TargetSpec
 
 /**
@@ -47,6 +48,13 @@ internal object HeyboxAdapter : TargetAdapter {
 
     override fun createNavigationState(context: Context, host: GlassHostLayout): AppNavigationState =
         HeyboxNavigationState(host)
+
+    // 评论输入框与键盘贴合 (2.1.7 恢复 BetterHeybox 时代的
+    // fork 定制 CommentInputDockHook, 见 HeyboxCommentDock):
+    // 与玻璃/底栏无关的独立行为, 随适配 hooks 一并装入。
+    override fun installHooks(lpparam: XC_LoadPackage.LoadPackageParam, spec: TargetSpec) {
+        HeyboxCommentDock.install()
+    }
 
     // 沉浸: 共享安装器只做到窗口标志与导航条透明, 宿主根布局仍
     // 按 navigationBars inset 留底; 在此把主界面窗口的导航条
@@ -107,12 +115,26 @@ internal object HeyboxAdapter : TargetAdapter {
     private fun stripChrome(navigation: ViewGroup) {
         clearChrome(navigation)
         extendContentUnderBar(navigation)
-        // 根布局里与底栏区域重叠的兄弟视图 (阴影层等) 一并清掉
-        // 底色; 内容与底栏本体不在此列。
+        stripBarContainer(navigation)
+        // 根布局里落在底栏带内的兄弟视图 (阴影层/背景条等) 一并
+        // 清掉底色; 内容与底栏本体不在此列。2.1.7: 判定带从
+        // 「与 rg_main 矩形相交」放宽为「整条底栏带」(左右到根
+        // 布局两边、向下到根布局底边)——原底栏背景条若只挂在
+        // 底栏下方 (导航 inset 区) 或间隙正后方, 旧判定够不着,
+        // 它会留在间隙里把主条与圆钮视觉上连成一片 (2.1.6 后
+        // 真机截图的白色连接)。高度上限同步放宽到 3 倍栏高,
+        // 仍只清薄层, 不碰内容级视图。
         runCatching {
             val parent = navigation.parent as? ViewGroup ?: return
             val barRect = android.graphics.Rect()
             navigation.getGlobalVisibleRect(barRect)
+            val stripRect = android.graphics.Rect(barRect)
+            val parentRect = android.graphics.Rect()
+            if (parent.getGlobalVisibleRect(parentRect)) {
+                stripRect.left = minOf(stripRect.left, parentRect.left)
+                stripRect.right = maxOf(stripRect.right, parentRect.right)
+                stripRect.bottom = maxOf(stripRect.bottom, parentRect.bottom)
+            }
             for (index in 0 until parent.childCount) {
                 val sibling = parent.getChildAt(index)
                 if (sibling === navigation || entryName(sibling) == MID_TAB_ID) continue
@@ -120,12 +142,38 @@ internal object HeyboxAdapter : TargetAdapter {
                     entryName(sibling) == "vg_fullscreen_video_container"
                 ) continue
                 val rect = android.graphics.Rect()
-                // 只清与底栏同高的薄层 (阴影/分隔层), 不碰内容级视图。
-                if (sibling.getGlobalVisibleRect(rect) && rect.height() <= barRect.height() * 2 &&
-                    android.graphics.Rect.intersects(rect, barRect)
+                if (sibling.getGlobalVisibleRect(rect) && rect.height() <= barRect.height() * 3 &&
+                    android.graphics.Rect.intersects(rect, stripRect)
                 ) {
                     clearChrome(sibling)
                 }
+            }
+        }
+    }
+
+    /**
+     * 清原底栏容器的主题背景 (2.1.7, 与掌盟同口径): 从 rg_main
+     * 逐层向上 (至多 3 层), 只清底边与底栏对齐、高度在底栏
+     * 量级 (≤260dp)、宽度不小于底栏的祖先; vg_main_root 是
+     * 全屏根布局, 高度远超上限, 天然跳过。只清背景, 不动布局。
+     */
+    private fun stripBarContainer(navigation: ViewGroup) {
+        runCatching {
+            val density = navigation.resources.displayMetrics.density
+            val navLoc = IntArray(2).also(navigation::getLocationInWindow)
+            val navBottom = navLoc[1] + navigation.height
+            var current = navigation.parent as? ViewGroup
+            var depth = 0
+            while (current != null && depth < 3) {
+                val loc = IntArray(2).also(current::getLocationInWindow)
+                val bottomDelta = kotlin.math.abs((loc[1] + current.height) - navBottom)
+                val qualifies = current.height in 1..(260f * density).toInt() &&
+                    bottomDelta <= (20f * density).toInt() &&
+                    current.width >= navigation.width
+                if (!qualifies) break
+                clearChrome(current)
+                current = current.parent as? ViewGroup
+                depth++
             }
         }
     }
