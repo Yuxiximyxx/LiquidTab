@@ -15,6 +15,8 @@ import android.widget.TextView
 import io.github.offlineglass.hook.GlassHostLayout
 import io.github.offlineglass.hook.adapters.AdapterNavigationFrame
 import io.github.offlineglass.hook.adapters.AppNavigationState
+import io.github.offlineglass.hook.adapters.NavigationCaptureLabels
+import io.github.offlineglass.hook.compat.XposedBridge
 import kotlin.math.min
 
 /**
@@ -30,11 +32,113 @@ import kotlin.math.min
  * (enabledNavigationIndices 只含四个页面槽), 由 draw() 在通用
  * 投影之后把原生加号按钮本体画进圆钮, 找不到时手绘加号兜底
  * (贴吧同款), 保证圆钮永不空白。
+ *
+ * 2.1.9 (商城页变样): 真机截图逐像素核对定案——切到商城页
+ * 后整条变黑底、商城槽位是一个纯平蓝椭圆、其余槽位发暗。
+ * 蓝形的尺寸与首页选中药丸逐像素相同 (151×120px), 但它不
+ * 是药丸被染蓝: 商城页那张快照根本不是逐叶捕获的产物, 而
+ * 是宿主通用兜底对源的整树绘制 (黑底矩形带方形直角、内嵌
+ * 在圆角玻璃面板轮廓之内, 是位图矩形的边缘)。逐叶捕获先把
+ * 目标清成全透明再逐叶绘制, 画不出整幅黑底; 只有通用兜底
+ * (captureNavigation 返回 false 时宿主走 source.draw()) 能
+ * 产生这种位图。商城单元在该位图里只剩一个蓝椭圆: 该页的
+ * 商城单元在软件绘制下拿不到图标叶子/文字 (只剩选中态的
+ * 椭圆背景视图), 旧捕获的「任一 tab 素材全空即整次失败」
+ * 正是触发点 (或行枚举按 hasText 过滤把无文字的商城单元
+ * 排除、tab 数凑不齐四)。药丸看着变蓝, 是药丸透镜采样了
+ * 这张位图里商城槽位的蓝椭圆。本版三层修:
+ * ①捕获加固 (见 QtlArtworkCapture): 行枚举改按行子视图
+ * 普查 (五孩子时剔除中间发布占位), 素材全空只让该槽留空、
+ * 不再整次失败; 图标叶子跳过填满单元的背景型 ImageView,
+ * 图标布局/绘制尺寸钳制, 文字永远有位置;
+ * ②已有好快照时, 普查不完整就推迟捕获 (inspectNavigation-
+ * CaptureLabels), 保住上一张完整快照 (商城槽位继续显示
+ * 首页捕获到的正常图标文字), 行结构恢复后自然重捕获;
+ * ③staged 捕获 + 提交前校验 (QtlAdapter.stagedNavigation-
+ * Snapshot 与下方 acceptAndCommitNavigationSnapshot):
+ * 逐叶捕获的位图大面积透明, 通用兜底位图几乎全不透明,
+ * 不透明占比超阈值直接拒收, 黑底位图永远上不了屏。
  */
 internal class QtlNavigationState(private val host: GlassHostLayout) : AppNavigationState {
 
+    private var lastRejectLogAt = 0L
+
+    private companion object {
+        /** 普查不完整时推迟捕获的间隔。 */
+        const val CAPTURE_RETRY_DELAY_MS = 300L
+        /** staged 校验: 不透明占比超此值视为通用兜底位图, 拒收。 */
+        const val MAX_OPAQUE_FRACTION = 0.45f
+        /** 拒收日志节流间隔 (拒收会随探针重试, 避免刷屏)。 */
+        const val REJECT_LOG_INTERVAL_MS = 5_000L
+    }
+
     override fun captureNavigation(source: ViewGroup, target: Bitmap): Boolean =
         QtlArtworkCapture.capture(source, target)
+
+    /**
+     * 已有可用快照时, 若当前文字行普查不完整 (某个 tab 单元
+     * 既提取不到图标叶子也提取不到文字——商城页的商城单元
+     * 即此形态), 推迟本次捕获, 保住上一张完整快照; 行结构
+     * 恢复完整后签名机制会自然重捕获。尚无快照时不推迟,
+     * 让首捕获先行 (质量由 staged 提交校验兜底)。
+     */
+    override fun inspectNavigationCaptureLabels(
+        source: ViewGroup, hasSnapshot: Boolean,
+    ): NavigationCaptureLabels? {
+        if (!hasSnapshot) return null
+        val tabs = QtlArtworkCapture.censusTabs(source) ?: return null
+        val incomplete = tabs.any { !QtlArtworkCapture.hasAnyArt(it) }
+        return if (incomplete) {
+            NavigationCaptureLabels(emptyList(), CAPTURE_RETRY_DELAY_MS)
+        } else null
+    }
+
+    /**
+     * staged 提交校验 (2.1.9): 逐叶捕获的位图只有图标/文字/
+     * 加号按钮本体, 大面积透明 (实测占比约三成以内); 通用
+     * 兜底位图带宿主原底栏的整幅底色, 几乎全不透明。不透明
+     * 占比超阈值即拒收 (返回 false 后宿主不提交签名、保留
+     * 在屏的上一张快照, 后续探针会重试)。发布由宿主的
+     * staged 交换块完成, 这里不调 commit (JD 式 commit 会让
+     * scratch 与在屏位图同体, 反而破坏暂存隔离)。
+     */
+    override fun acceptAndCommitNavigationSnapshot(
+        source: ViewGroup?, target: Bitmap, selectedIndex: Int, slotCount: Int,
+        commit: (Bitmap) -> Unit,
+    ): Boolean {
+        val fraction = opaqueFraction(target)
+        if (fraction > MAX_OPAQUE_FRACTION) {
+            val now = android.os.SystemClock.uptimeMillis()
+            if (now - lastRejectLogAt > REJECT_LOG_INTERVAL_MS) {
+                lastRejectLogAt = now
+                XposedBridge.log(
+                    "[OfflineGlass][QTL] rejected generic snapshot: " +
+                        "opaque fraction=$fraction",
+                )
+            }
+            return false
+        }
+        return true
+    }
+
+    /** 位图不透明像素占比 (步进 4 采样, alpha ≥ 128 计不透明)。 */
+    private fun opaqueFraction(bitmap: Bitmap): Float {
+        if (bitmap.width <= 0 || bitmap.height <= 0) return 1f
+        val step = 4
+        var total = 0
+        var opaque = 0
+        var y = 0
+        while (y < bitmap.height) {
+            var x = 0
+            while (x < bitmap.width) {
+                total++
+                if (Color.alpha(bitmap.getPixel(x, y)) >= 128) opaque++
+                x += step
+            }
+            y += step
+        }
+        return if (total == 0) 1f else opaque.toFloat() / total
+    }
 
     /**
      * 选中槽位以宿主真实选中状态为准 (2.1.7)。
@@ -75,13 +179,11 @@ internal class QtlNavigationState(private val host: GlassHostLayout) : AppNaviga
         return fallbackResolve(src)
     }
 
-    /** 绑定缺失/失效时的旧口径枚举 (捕获前或源重建时)。 */
+    /** 绑定缺失/失效时的兜底枚举 (捕获前或源重建时), 与捕获
+     * 同一普查口径 (2.1.9: 无文字的单元也算 tab, 否则商城页
+     * 会因凑不齐四个而落回宿主的下标打分判定)。 */
     private fun fallbackResolve(src: ViewGroup): Int? {
-        val row = QtlViews.findByEntryName(src, QtlViews.TAB_ROW_ID) as? ViewGroup
-            ?: return null
-        val tabs = (0 until row.childCount).map(row::getChildAt)
-            .filter { it.visibility != View.GONE && QtlViews.hasText(it) }
-        if (tabs.size != QtlViews.SLOT_COUNT - 1) return null
+        val tabs = QtlArtworkCapture.censusTabs(src) ?: return null
         return scoreTabs(tabs)
     }
 
@@ -195,16 +297,6 @@ internal object QtlViews {
     const val SLOT_COUNT = 5
     const val CENTER_INDEX = 2
 
-    fun hasText(view: View): Boolean {
-        if (view is TextView) return !view.text.isNullOrBlank()
-        if (view is ViewGroup) {
-            for (index in 0 until view.childCount) {
-                if (hasText(view.getChildAt(index))) return true
-            }
-        }
-        return false
-    }
-
     fun entryName(view: View): String? = runCatching {
         if (view.id == View.NO_ID) null else view.resources.getResourceEntryName(view.id)
     }.getOrNull()
@@ -226,6 +318,15 @@ internal object QtlViews {
     fun findCenterButton(source: ViewGroup): View? =
         findByEntryName(source, CENTER_BUTTON_ID)
             ?: source.rootView?.let { findByEntryName(it, CENTER_BUTTON_ID) }
+
+    fun isDescendant(view: View, ancestor: View): Boolean {
+        var current: View? = view
+        while (current != null) {
+            if (current === ancestor) return true
+            current = current.parent as? View
+        }
+        return false
+    }
 
     /**
      * 把叶子视图按自身尺寸 (必要时等比缩小到 maxSize) 画到
@@ -278,25 +379,98 @@ internal object QtlSlotBindings {
 internal object QtlArtworkCapture {
     private const val SLOT_COUNT = 5
     private const val CENTER_INDEX = 2
+    /** 图标绘制尺寸上限 (dp): 真图标约 24dp, 异常大叶子钳到此值。 */
+    private const val MAX_ICON_DP = 32f
 
     private class TabArt(
         val iconView: ImageView?,
         val iconDrawable: Drawable?,
         val stateView: View?,
         val label: TextView?,
-    )
+    ) {
+        val isEmpty: Boolean
+            get() = label == null && iconView == null && iconDrawable == null
+    }
+
+    /**
+     * 文字行的 tab 单元普查 (2.1.9)。
+     *
+     * 旧口径按「非 GONE 且带文字」过滤行子视图: 商城页的商城
+     * 单元在软件绘制下没有文字 (只剩椭圆背景视图) 时会被整
+     * 个排除, tab 数凑不齐四、捕获整次失败, 宿主随即落到
+     * 通用兜底整树绘制 (黑底 + 蓝椭圆上屏)。现按行子视图的
+     * 构成普查: 非 GONE 孩子正好四个即全是 tab; 正好五个
+     * 时中间一个应是发布占位 (加号按钮本体/包含加号按钮,
+     * 或无文字——四个真 tab 都有标签), 剔除后须剩四个;
+     * 其余构成判普查失败。捕获、选中兜底、点按兜底与捕获
+     * 推迟普查共用同一口径, 保证槽位映射在各页一致。
+     */
+    fun censusTabs(source: ViewGroup): List<View>? {
+        val row = QtlViews.findByEntryName(source, QtlViews.TAB_ROW_ID) as? ViewGroup
+            ?: return null
+        val children = (0 until row.childCount).map(row::getChildAt)
+            .filter { it.visibility != View.GONE }
+        if (children.size == SLOT_COUNT - 1) return children
+        if (children.size == SLOT_COUNT) {
+            val center = children[CENTER_INDEX]
+            val button = QtlViews.findCenterButton(source)
+            // 发布位在行内固定居中且从无文字 (四个真 tab 都有
+            // 标签): 是加号按钮本体、包含加号按钮、或无文字,
+            // 任一成立即按占位剔除。
+            val isPlaceholder = center === button ||
+                (button != null && QtlViews.isDescendant(button, center)) ||
+                !hasText(center)
+            if (isPlaceholder) {
+                return children.filterIndexed { index, _ -> index != CENTER_INDEX }
+            }
+        }
+        return null
+    }
+
+    /** 单元能否提取到任何素材 (图标叶子或文字), 供捕获推迟普查。 */
+    fun hasAnyArt(unit: View): Boolean = !extractTabArt(unit).isEmpty
+
+    /**
+     * 叶子是否「填满单元」: 选中态的椭圆背景/指示视图会铺满
+     * 整个 tab 单元, 真图标只是单元中央的小图 (约 24dp)。
+     * 宽高同时超过单元六成的 ImageView 按背景处理。单元
+     * 本身是 ImageView 时不判 (它就是这个 tab 的全部)。
+     */
+    private fun fillsUnit(view: View, unit: View): Boolean {
+        if (view === unit) return false
+        return unit.width > 0 && unit.height > 0 &&
+            view.width > unit.width * 0.6f && view.height > unit.height * 0.6f
+    }
+
+    private var lastCensusLogAt = 0L
+
+    /** 普查异常日志节流 (捕获失败会随探针重试, 避免刷屏)。 */
+    private fun logCensusThrottled(message: String) {
+        val now = android.os.SystemClock.uptimeMillis()
+        if (now - lastCensusLogAt < 5_000L) return
+        lastCensusLogAt = now
+        XposedBridge.log("[OfflineGlass][QTL] capture census: $message")
+    }
 
     fun capture(source: ViewGroup, target: Bitmap): Boolean {
-        val row = QtlViews.findByEntryName(source, QtlViews.TAB_ROW_ID) as? ViewGroup
-            ?: return false
-        val tabs = (0 until row.childCount).map(row::getChildAt)
-            .filter { it.visibility != View.GONE && hasText(it) }
-        if (tabs.size != SLOT_COUNT - 1) return false
+        val tabs = censusTabs(source) ?: run {
+            logCensusThrottled("census failed")
+            return false
+        }
         val button = QtlViews.findCenterButton(source) ?: return false
         if (button.width <= 0 || button.height <= 0) return false
         val arts = tabs.map(::extractTabArt)
-        if (arts.any { it.label == null && it.iconView == null && it.iconDrawable == null }) {
+        // 单个 tab 素材全空只让该槽在本张快照里留空, 不再整次
+        // 失败落回通用兜底 (2.1.9 商城页定案); 四个全空才判
+        // 失败 (行未就绪/认错行)。
+        if (arts.all { it.isEmpty }) {
+            logCensusThrottled("all tab arts empty")
             return false
+        }
+        if (arts.any { it.isEmpty }) {
+            logCensusThrottled(
+                "empty tab art at " + arts.indexOfFirst { it.isEmpty },
+            )
         }
         // 身份绑定: 槽位 → 本次捕获所用的 tab 视图本体 (中间槽
         // 绑加号按钮本体), 供 dispatchNavigationTap 按身份转发。
@@ -335,13 +509,17 @@ internal object QtlArtworkCapture {
                 stateView = unit
             }
         }
-        // 深度优先找第一个带 drawable 的 ImageView 作图标叶子。
+        // 深度优先找第一个带 drawable 的 ImageView 作图标叶子;
+        // 填满单元的背景型 ImageView (选中态椭圆指示) 跳过,
+        // 继续找真图标 (2.1.9)。
         if (iconView == null && iconDrawable == null) {
             val stack = ArrayDeque<View>()
             stack += unit
             while (stack.isNotEmpty()) {
                 val view = stack.removeLast()
-                if (view is ImageView && view.drawable != null && view.width > 0) {
+                if (view is ImageView && view.drawable != null && view.width > 0 &&
+                    !fillsUnit(view, unit)
+                ) {
                     iconView = view
                     break
                 }
@@ -371,11 +549,27 @@ internal object QtlArtworkCapture {
         canvas: Canvas, art: TabArt, centerX: Float, slotWidth: Float,
         targetHeight: Int, density: Float,
     ) {
-        val iconHeight = when {
+        // 图标尺寸先钳制 (2.1.9): 真图标约 24dp; 若叶子异常
+        // 巨大 (背景型视图漏网), 按原始尺寸布局会把文字顶出
+        // 位图、画出占满槽位的大图 (商城页蓝椭圆的形态)。
+        // 等比钳到 32dp 内, 布局与绘制都用钳后尺寸。
+        var iconWidth = when {
+            art.iconView != null -> art.iconView.width.toFloat()
+            art.iconDrawable != null -> (art.iconDrawable.intrinsicWidth.takeIf { it > 0 }
+                ?: art.iconDrawable.bounds.width()).toFloat()
+            else -> 0f
+        }
+        var iconHeight = when {
             art.iconView != null -> art.iconView.height.toFloat()
             art.iconDrawable != null -> (art.iconDrawable.intrinsicHeight.takeIf { it > 0 }
                 ?: art.iconDrawable.bounds.height()).toFloat()
             else -> 0f
+        }
+        if (iconWidth > 0f && iconHeight > 0f) {
+            val maxIcon = MAX_ICON_DP * density
+            val scale = min(1f, maxIcon / maxOf(iconWidth, iconHeight))
+            iconWidth *= scale
+            iconHeight *= scale
         }
         val label = art.label
         val paint = label?.let {
@@ -393,21 +587,20 @@ internal object QtlArtworkCapture {
         when {
             art.iconView != null -> {
                 QtlViews.drawLeafCentered(
-                    canvas, art.iconView, centerX, top + iconHeight / 2f, slotWidth * 0.92f,
+                    canvas, art.iconView, centerX, top + iconHeight / 2f,
+                    maxOf(iconWidth, iconHeight),
                 )
             }
             art.iconDrawable != null -> {
                 val drawable = art.iconDrawable
-                val width = (drawable.intrinsicWidth.takeIf { it > 0 }
-                    ?: drawable.bounds.width()).toFloat()
                 val savedBounds = android.graphics.Rect(drawable.bounds)
                 val savedState = drawable.state
                 if (art.stateView != null) drawable.state = art.stateView.drawableState
                 canvas.save()
                 canvas.clipRect(centerX - slotWidth / 2f, 0f, centerX + slotWidth / 2f, targetHeight.toFloat())
                 drawable.setBounds(
-                    (centerX - width / 2f).toInt(), top.toInt(),
-                    (centerX + width / 2f).toInt(), (top + iconHeight).toInt(),
+                    (centerX - iconWidth / 2f).toInt(), top.toInt(),
+                    (centerX + iconWidth / 2f).toInt(), (top + iconHeight).toInt(),
                 )
                 drawable.draw(canvas)
                 canvas.restore()

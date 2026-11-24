@@ -54,6 +54,12 @@ import io.github.offlineglass.targets.TargetSpec
  * 卡顿: suppress 全量解析改每源一次并缓存, 每帧只复清缓存
  * 视图 (见 ChromeCache); 选中判定改走身份绑定 + 强信号
  * 早停 (见 QtlNavigationState)。
+ *
+ * 2.1.9: 商城页整条变黑 + 商城槽位蓝椭圆——该页快照落到
+ * 宿主通用兜底整树绘制 (逐叶捕获在该页失败), 本版开
+ * staged 捕获并在提交前按不透明占比校验拒收兜底位图,
+ * 捕获侧加固与普查推迟见 QtlNavigationState 类注释。本版
+ * 只动 qtl, heybox 已由小乐确认修完、不碰。
  */
 internal object QtlAdapter : TargetAdapter {
     override val key = "qtl"
@@ -70,6 +76,12 @@ internal object QtlAdapter : TargetAdapter {
     // 独立发布键的圆钮没有任何通用路径绘制 artwork (xhs/贴吧
     // 均自绘), 故本适配自持绘制: 通用投影 + 原生加号按钮本体。
     override val ownsNavigationDrawing = true
+
+    // staged 捕获 (2.1.9): 快照先画进暂存位图, 经
+    // QtlNavigationState.acceptAndCommitNavigationSnapshot
+    // 校验 (不透明占比) 通过后才由宿主交换上屏, 通用兜底
+    // 的黑底位图永远不会直接画进在屏位图。
+    override val stagedNavigationSnapshot = true
 
     override fun createNavigationState(context: Context, host: GlassHostLayout): AppNavigationState =
         QtlNavigationState(host)
@@ -432,19 +444,16 @@ internal object QtlAdapter : TargetAdapter {
         // 加号按钮本体), 与用户所见的 artwork 严格同源。
         val bound = QtlSlotBindings.lookup(src)?.get(index)
         if (bound != null) return deliverClick(bound)
-        // 兜底: 尚未捕获成功时, 按与捕获完全相同的口径枚举
-        // (非 GONE 且带文字的四个 tab, 序号与槽位同映射)。
+        // 兜底: 尚未捕获成功时, 按与捕获完全相同的普查口径
+        // 枚举四个 tab (2.1.9: 无文字的单元也算, 序号与槽位
+        // 同映射)。
         if (index == CENTER_INDEX) {
             val button = findByEntryName(src, CENTER_BUTTON_ID)
                 ?: src.rootView?.let { findByEntryName(it, CENTER_BUTTON_ID) }
                 ?: return false
             return deliverClick(button)
         }
-        val row = findByEntryName(src, TAB_ROW_ID) as? ViewGroup ?: return false
-        val tabs = (0 until row.childCount)
-            .map(row::getChildAt)
-            .filter { it.visibility != View.GONE && hasText(it) }
-        if (tabs.size != SLOT_COUNT - 1) return false
+        val tabs = QtlArtworkCapture.censusTabs(src) ?: return false
         // 槽位 0/1/3/4 依次对应文字行的四个 tab。
         val ordinal = if (index < CENTER_INDEX) index else index - 1
         val target = tabs.getOrNull(ordinal) ?: return false
@@ -538,16 +547,6 @@ internal object QtlAdapter : TargetAdapter {
         if (view.foreground != null) view.foreground = null
         if (view.elevation != 0f) view.elevation = 0f
         if (view.translationZ != 0f) view.translationZ = 0f
-    }
-
-    private fun hasText(view: View): Boolean {
-        if (view is android.widget.TextView) return !view.text.isNullOrBlank()
-        if (view is ViewGroup) {
-            for (index in 0 until view.childCount) {
-                if (hasText(view.getChildAt(index))) return true
-            }
-        }
-        return false
     }
 
     private fun isDescendant(view: View, ancestor: View): Boolean {
