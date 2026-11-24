@@ -58,10 +58,50 @@ import kotlin.math.min
  * Snapshot 与下方 acceptAndCommitNavigationSnapshot):
  * 逐叶捕获的位图大面积透明, 通用兜底位图几乎全不透明,
  * 不透明占比超阈值直接拒收, 黑底位图永远上不了屏。
+ *
+ * 2.1.10 (活动页条身黑底): 2.1.9 真机复验——商城槽位与
+ * 药丸已正常, 但「发现 → 活动」子页上整条仍是近不透明
+ * 黑底。逐环核对代码 + 截图裁图取证后的判定链:
+ * ①本页的黑不在 artwork 链: 截图里图标/文字/药丸都是逐叶
+ * 快照的样子, 说明逐叶快照已被正常提交 (若是通用兜底位图
+ * 上屏, 商城槽不会是正常图标; 若好快照被 staged 拒收, 在
+ * 屏的仍是上一张逐叶快照)。②条身由宿主 drawGlassPanel 绘
+ * 制: drawOuterGlass 画实时背景场景 (liveBackdropNode),
+ * 再叠 surfaceContainerColor 的半透明填充。实时场景的录制
+ * 是「先铺一层场景底色, 再回放宿主父层下各兄弟视图的
+ * RenderNode」; 底色走 liveSceneBackgroundColor——逐层找
+ * 不透明 ColorDrawable 背景, 找不到落主题 colorBackground,
+ * 再落 isDarkGlass 时的纯黑。场景内容覆盖不到的区域, 条身
+ * 就只剩这层不透明底色 + 半透明填充 = 近不透明黑。③截图
+ * 裁图实证与此吻合: 条身上部约 1/3 能折射到紧邻上方的卡片
+ * 内容 (透镜边缘折射), 下部约 2/3 是平黑、与身后卡片下半
+ * 的图文无关——即该子页上下文里场景回放的内容覆盖不到条
+ * 身下部 (该页内容为何覆盖不到: 疑为合成层回放不可靠的
+ * 页面构成, 待本版日志证实, 见下方 backdrop 状态日志)。
+ * 修法 (见 resolveBackdropScene): qtl 主动供给背景场景
+ * (宿主父层下包含导航源的应用根布局), 宿主随即改用适配器
+ * 的 backdropSceneBaseColor 接口默认 (全透明) 作场景底色,
+ * 不再走 liveSceneBackgroundColor 的不透明黑; 场景内容覆
+ * 盖不到之处条身保持透明玻璃 (只剩半透明填充), 最坏情况
+ * 也只是「只画图标文字的清玻璃」, 永不落回不透明黑。
+ * 同时补两条定案日志: 快照提交分类 (snapshot commit) 与
+ * 背景状态变化 (backdrop), 真机若仍黑, 导 LSPosed 日志
+ * 看这两行即可定案。
  */
 internal class QtlNavigationState(private val host: GlassHostLayout) : AppNavigationState {
 
     private var lastRejectLogAt = 0L
+
+    // ---- 2.1.10 定案日志状态 ----
+    /** 最近一次 captureNavigation 是否逐叶成功 (false = 宿主走了通用兜底)。 */
+    private var lastCaptureWasLeaf: Boolean? = null
+    /** 是否已有任一快照成功提交过 (区分拒收时是保旧图还是无图可用)。 */
+    private var everCommittedSnapshot = false
+    private var lastCommitLogKind: String? = null
+    private var lastCommitLogAt = 0L
+    private var lastBackdropLogKey: String? = null
+    /** resolveBackdropScene 的缓存 (校验失效才重找)。 */
+    private var cachedScene: View? = null
 
     private companion object {
         /** 普查不完整时推迟捕获的间隔。 */
@@ -70,10 +110,92 @@ internal class QtlNavigationState(private val host: GlassHostLayout) : AppNaviga
         const val MAX_OPAQUE_FRACTION = 0.45f
         /** 拒收日志节流间隔 (拒收会随探针重试, 避免刷屏)。 */
         const val REJECT_LOG_INTERVAL_MS = 5_000L
+        /** 提交分类日志: 同类结果最短间隔 (分类变化立即打)。 */
+        const val COMMIT_LOG_INTERVAL_MS = 30_000L
     }
 
-    override fun captureNavigation(source: ViewGroup, target: Bitmap): Boolean =
-        QtlArtworkCapture.capture(source, target)
+    override fun captureNavigation(source: ViewGroup, target: Bitmap): Boolean {
+        val leaf = QtlArtworkCapture.capture(source, target)
+        lastCaptureWasLeaf = leaf
+        return leaf
+    }
+
+    /** 当前页上下文标识 (宿主 context 即 Activity), 供定案日志定位子页。 */
+    private fun contextLabel(): String = runCatching {
+        host.context.javaClass.simpleName.ifBlank { "?" }
+    }.getOrDefault("?")
+
+    /**
+     * 主动供给背景场景 (2.1.10, 黑底落点)。
+     *
+     * 返回宿主父层下「包含导航源」的应用根布局: 默认清扫本
+     * 来就以它为主要兄弟回放, 采样集合不变; 真正的变化在场
+     * 景底色——宿主只对适配器供给的场景调用
+     * backdropSceneBaseColor (接口默认全透明), 默认清扫则走
+     * liveSceneBackgroundColor (夜间落不透明黑)。本适配不覆
+     * 写 backdropSceneBaseColor: 场景内容覆盖不到条身时,
+     * 条身保持透明玻璃, 不再被不透明黑底色填满。找不到合格
+     * 兄弟时返回 null, 退回宿主默认清扫 (行为同旧版)。
+     */
+    override fun resolveBackdropScene(hostView: View): View? {
+        val parent = hostView.parent as? ViewGroup ?: return null
+        val source = host.navigationSource ?: return null
+        cachedScene?.let { scene ->
+            if (scene.parent === parent && scene.isAttachedToWindow &&
+                QtlViews.isDescendant(source, scene)
+            ) return scene
+            cachedScene = null
+        }
+        for (index in 0 until parent.childCount) {
+            val child = parent.getChildAt(index) ?: continue
+            if (child === hostView) continue
+            if (QtlViews.isDescendant(source, child)) {
+                cachedScene = child
+                return child
+            }
+        }
+        return null
+    }
+
+    /**
+     * 背景状态变化日志 (2.1.10 定案用)。
+     *
+     * onHostFrame 由宿主在每个 pre-draw 帧调用, 这里只做 O(1)
+     * 的状态键比较; 状态变化时才打一行并做一次有界 WebView
+     * 探查 (活动子页疑为合成层页面, 该位是关键证据)。真机
+     * 若仍黑: 看黑底出现时段内本行 live/displayList/scene/
+     * webView 的取值即可判定背景链断在哪一环。
+     */
+    override fun onHostFrame(hostView: View) {
+        val live = host.liveBackdropActiveForAdapter
+        val displayList = host.liveBackdropNodeForAdapter.hasDisplayList()
+        val scene = resolveBackdropScene(hostView) != null
+        val key = "$live/$displayList/$scene"
+        if (key == lastBackdropLogKey) return
+        lastBackdropLogKey = key
+        val webView = cachedScene?.let { containsWebView(it) }
+        XposedBridge.log(
+            "[OfflineGlass][QTL] backdrop: live=$live displayList=$displayList " +
+                "scene=$scene webView=$webView ctx=${contextLabel()}",
+        )
+    }
+
+    /** 有界探查子树里是否有可见 WebView (仅状态变化时跑, 上限 800 个视图)。 */
+    private fun containsWebView(root: View): Boolean {
+        val stack = ArrayDeque<View>()
+        stack += root
+        var visited = 0
+        while (stack.isNotEmpty() && visited++ < 800) {
+            val view = stack.removeLast()
+            if (view is android.webkit.WebView && view.isShown &&
+                view.width > 0 && view.height > 0
+            ) return true
+            if (view is ViewGroup) {
+                for (index in view.childCount - 1 downTo 0) stack += view.getChildAt(index)
+            }
+        }
+        return false
+    }
 
     /**
      * 已有可用快照时, 若当前文字行普查不完整 (某个 tab 单元
@@ -116,9 +238,40 @@ internal class QtlNavigationState(private val host: GlassHostLayout) : AppNaviga
                         "opaque fraction=$fraction",
                 )
             }
+            // 提交分类 (2.1.10): 从未提交成功过又拒收 = 在屏无
+            // 快照 (empty-fallback); 已有旧图时拒收只是保旧图。
+            logCommit(
+                if (everCommittedSnapshot) "rejected-opaque" else "empty-fallback",
+                fraction, selectedIndex,
+            )
             return false
         }
+        val kind = when (lastCaptureWasLeaf) {
+            true -> "committed-leaf"
+            false -> "committed-generic"
+            null -> "committed-unknown"
+        }
+        everCommittedSnapshot = true
+        logCommit(kind, fraction, selectedIndex)
         return true
+    }
+
+    /**
+     * 快照提交分类日志 (2.1.10 定案用): 分类变化立即打,
+     * 同类 30 秒节流。每行带不透明占比、当前页上下文与选中
+     * 槽位; 真机复现黑底时, 对照同一时段的 backdrop 行即可
+     * 分清黑来自 artwork 链还是条身背景链。
+     */
+    private fun logCommit(kind: String, fraction: Float, selectedIndex: Int) {
+        val now = android.os.SystemClock.uptimeMillis()
+        if (kind == lastCommitLogKind && now - lastCommitLogAt < COMMIT_LOG_INTERVAL_MS) return
+        lastCommitLogKind = kind
+        lastCommitLogAt = now
+        XposedBridge.log(
+            "[OfflineGlass][QTL] snapshot commit: result=$kind " +
+                "opaque=${(fraction * 1000).toInt() / 1000f} sel=$selectedIndex " +
+                "everCommitted=$everCommittedSnapshot ctx=${contextLabel()}",
+        )
     }
 
     /** 位图不透明像素占比 (步进 4 采样, alpha ≥ 128 计不透明)。 */

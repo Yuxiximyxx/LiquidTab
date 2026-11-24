@@ -117,3 +117,30 @@
   以内、兜底位图近全不透明），拒收不调 commit、由宿主
   staged 交换块负责发布，节流日志可查。
 - 状态：2.1.9 已发布待验，以上均为代码层修复，未经真机验证。
+- 2.1.10：小乐真机验 2.1.9 只回「黑底还是没解决」+ 活动
+  页截图（发现→活动子页）：商城槽位与药丸已正常，但整条
+  仍近不透明黑。本版先取证再修。已由代码核实+截图裁图
+  确定的：①黑不在 artwork 链——截图中图标/文字/药丸均
+  为逐叶快照形态，逐叶快照已正常提交；staged 拒收只保旧
+  图、也产生不了这块填满面板轮廓的黑。②条身填充者是宿
+  主 drawGlassPanel 的实时背景场景：录制先铺场景底色
+  （liveSceneBackgroundColor：找不透明 ColorDrawable
+  背景→主题 colorBackground→夜间纯黑），再回放兄弟视图
+  RenderNode，之后叠半透明 surface 填充；场景内容覆盖
+  不到的区域只剩不透明底色+填充=近不透明黑。③裁图实证：
+  条身上部约 1/3 有紧邻上方卡片的折射内容，下部约 2/3
+  平黑、与身后卡片下半图文无关，即该子页场景内容覆盖不
+  到条身下部。待日志证实的：该页内容为何覆盖不到（疑为
+  合成层回放不可靠的页面构成；backdrop 日志带 webView
+  探查位）。修法：QtlNavigationState.resolveBackdropScene
+  供给场景（宿主父层下含导航源的应用根布局，采样集合与
+  默认清扫一致），宿主随即对场景底色改用
+  backdropSceneBaseColor 接口默认（全透明），本适配不覆
+  写该方法——覆盖不到处条身保持透明玻璃，最坏退化为只
+  画图标文字的清玻璃，永不落回不透明黑。定案日志两条：
+  「snapshot commit: result=committed-leaf/committed-
+  generic/rejected-opaque/empty-fallback …」（分类变化
+  立即、否则 30 秒节流）与「backdrop: live/displayList/
+  scene/webView/ctx」（状态变化时打）。真机若仍黑，导出
+  LSPosed 日志看这两行在黑底时段的取值即可定案。
+- 状态：2.1.10 已发布待验，以上均为代码层修复，未经真机验证。

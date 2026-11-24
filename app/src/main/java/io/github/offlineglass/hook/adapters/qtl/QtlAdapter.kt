@@ -60,6 +60,13 @@ import io.github.offlineglass.targets.TargetSpec
  * staged 捕获并在提交前按不透明占比校验拒收兜底位图,
  * 捕获侧加固与普查推迟见 QtlNavigationState 类注释。本版
  * 只动 qtl, heybox 已由小乐确认修完、不碰。
+ *
+ * 2.1.10: 活动子页条身仍黑底——取证后定案黑在条身背景
+ * 链 (实时场景底色夜间为不透明黑, 该子页场景内容覆盖不
+ * 到条身下部), 不在 artwork 链。本版由导航状态主动供给
+ * 背景场景, 使场景底色改走全透明口径, 条身最坏退化为
+ * 透明玻璃; 并补快照提交分类与背景状态变化两条定案日志
+ * (均见 QtlNavigationState 类注释)。仍只动 qtl。
  */
 internal object QtlAdapter : TargetAdapter {
     override val key = "qtl"
