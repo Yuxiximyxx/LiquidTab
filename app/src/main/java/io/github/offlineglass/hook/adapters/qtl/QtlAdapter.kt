@@ -31,6 +31,11 @@ import io.github.offlineglass.targets.TargetSpec
  * 就退回文字行本身; acceptsNavigationSource 再做高度兜底;
  * 内容布局 (RelativeLayout ABOVE 规则) 与祖先链背景一律不再
  * 触碰, 去黑带只靠清源自身底色 + 安装器对直接父壳层的处理。
+ *
+ * 2.1.6: 源外加号按钮的黑坨在 suppress 阶段从窗口根部找到
+ * 并置 INVISIBLE (见 hideLeakedCenterButton); 点按改走捕获
+ * 时记录的槽位身份绑定 + 强送达 (见 QtlSlotBindings 与
+ * deliverClick), 不再按下标记数、也不落回宿主通用兜底。
  */
 internal object QtlAdapter : TargetAdapter {
     override val key = "qtl"
@@ -170,28 +175,113 @@ internal object QtlAdapter : TargetAdapter {
         clearChrome(navigation)
         findByEntryName(navigation, TAB_ROW_ID)?.let { clearChrome(it) }
         findByEntryName(navigation, CENTER_BUTTON_ID)?.let { clearChrome(it) }
+        hideLeakedCenterButton(navigation)
+    }
+
+    /**
+     * 加号按钮挂在更高层、不在导航源内时 (源退回文字行本身的
+     * 情形), 源的 alpha 隐藏罩不到它, 它的黑色圆形本体会透过
+     * 玻璃条下方露出半截 (2.1.5 真机截图正下方居中的黑坨)。
+     * 这里从窗口根部找到它并置 INVISIBLE: 只停它自身的绘制,
+     * 不改任何布局; 捕获与圆钮绘制都是对视图本体直接 draw(),
+     * 不受 visibility 影响, 点按绑定也照常。在源内时它已随源
+     * 一起被隐藏, 不重复处理。
+     */
+    private fun hideLeakedCenterButton(navigation: ViewGroup) {
+        runCatching {
+            val root = navigation.rootView ?: return
+            val button = findByEntryName(root, CENTER_BUTTON_ID) ?: return
+            if (isDescendant(button, navigation)) return
+            if (button.visibility != View.INVISIBLE) {
+                button.visibility = View.INVISIBLE
+            }
+        }
     }
 
     override fun dispatchNavigationTap(source: ViewGroup?, index: Int, slotCount: Int): Boolean {
         val src = source ?: return false
+        // 首选: 捕获时记录的身份绑定 (槽位 → tab 视图本体 /
+        // 加号按钮本体), 与用户所见的 artwork 严格同源。
+        val bound = QtlSlotBindings.lookup(src)?.get(index)
+        if (bound != null) return deliverClick(bound)
+        // 兜底: 尚未捕获成功时, 按与捕获完全相同的口径枚举
+        // (非 GONE 且带文字的四个 tab, 序号与槽位同映射)。
         if (index == CENTER_INDEX) {
             val button = findByEntryName(src, CENTER_BUTTON_ID)
                 ?: src.rootView?.let { findByEntryName(it, CENTER_BUTTON_ID) }
                 ?: return false
-            return runCatching { button.performClick() }.getOrDefault(false)
+            return deliverClick(button)
         }
         val row = findByEntryName(src, TAB_ROW_ID) as? ViewGroup ?: return false
-        val visible = (0 until row.childCount)
+        val tabs = (0 until row.childCount)
             .map(row::getChildAt)
-            .filter { it.visibility != View.GONE }
-        // 真 tab 带文字标签; 中间的占位/按钮没有, 据此排除,
-        // 避免占位挤占序号造成点按错位。
-        val labeled = visible.filter { hasText(it) }
-        val tabs = if (labeled.size >= 4) labeled else visible
+            .filter { it.visibility != View.GONE && hasText(it) }
+        if (tabs.size != SLOT_COUNT - 1) return false
         // 槽位 0/1/3/4 依次对应文字行的四个 tab。
         val ordinal = if (index < CENTER_INDEX) index else index - 1
         val target = tabs.getOrNull(ordinal) ?: return false
-        return runCatching { target.performClick() }.getOrDefault(false)
+        return deliverClick(target)
+    }
+
+    /**
+     * 把点按真正送达目标视图, 绝不落回宿主通用兜底路径 (它按
+     * 原始下标取子视图, 正是发布槽后偏一位的来源)。三级递进:
+     * 目标自身有监听 → performClick; 否则深度优先找它内部带
+     * 监听的子视图 (闲鱼适配同款); 再否则在目标中心合成一对
+     * DOWN/UP 触摸、从窗口根部分发, 交给宿主自己的命中分发
+     * (行级触摸监听也能接住)。合成触摸已按目标本体坐标投递
+     * 时即视为送达, 返回 true 防止宿主再按下标重复处理。
+     */
+    private fun deliverClick(target: View): Boolean {
+        if (runCatching { target.hasOnClickListeners() && target.performClick() }
+                .getOrDefault(false)
+        ) return true
+        if (clickDescendantWithListener(target)) return true
+        return synthesizeTap(target)
+    }
+
+    private fun clickDescendantWithListener(root: View): Boolean {
+        if (root !is ViewGroup) return false
+        val stack = ArrayDeque<View>()
+        for (index in root.childCount - 1 downTo 0) stack += root.getChildAt(index)
+        var visited = 0
+        while (stack.isNotEmpty() && visited++ < 200) {
+            val view = stack.removeLast()
+            if (view.isShown && runCatching {
+                    view.hasOnClickListeners() && view.performClick()
+                }.getOrDefault(false)
+            ) return true
+            if (view is ViewGroup) {
+                for (index in view.childCount - 1 downTo 0) stack += view.getChildAt(index)
+            }
+        }
+        return false
+    }
+
+    private fun synthesizeTap(target: View): Boolean {
+        if (!target.isAttachedToWindow || target.width <= 0 || target.height <= 0) return false
+        val root = target.rootView ?: return false
+        return runCatching {
+            val targetLoc = IntArray(2).also(target::getLocationInWindow)
+            val rootLoc = IntArray(2).also(root::getLocationInWindow)
+            val x = (targetLoc[0] - rootLoc[0] + target.width / 2f)
+            val y = (targetLoc[1] - rootLoc[1] + target.height / 2f)
+            val now = android.os.SystemClock.uptimeMillis()
+            val down = android.view.MotionEvent.obtain(
+                now, now, android.view.MotionEvent.ACTION_DOWN, x, y, 0,
+            )
+            val up = android.view.MotionEvent.obtain(
+                now, now + 48L, android.view.MotionEvent.ACTION_UP, x, y, 0,
+            )
+            try {
+                root.dispatchTouchEvent(down)
+                root.dispatchTouchEvent(up)
+            } finally {
+                down.recycle()
+                up.recycle()
+            }
+            true
+        }.getOrDefault(false)
     }
 
     private fun clearChrome(view: View) {

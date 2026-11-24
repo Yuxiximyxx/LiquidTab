@@ -54,9 +54,9 @@ jobs:
           "$SDK/zipalign" -p -f 4 "$SRC" dist/aligned.apk
           "$SDK/apksigner" sign --ks "$RUNNER_TEMP/liquidtab-release.keystore" \
             --ks-pass env:STORE_PASSWORD --ks-key-alias "$KEY_ALIAS" --key-pass env:KEY_PASSWORD \
-            --out dist/LiquidTab-2.1.5-release.apk dist/aligned.apk
+            --out dist/LiquidTab-2.1.6-release.apk dist/aligned.apk
           rm dist/aligned.apk
-          "$SDK/apksigner" verify --print-certs dist/LiquidTab-2.1.5-release.apk
+          "$SDK/apksigner" verify --print-certs dist/LiquidTab-2.1.6-release.apk
           ls -lh dist
 
       - name: Upload artifact
@@ -69,90 +69,61 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v2.1.5
-          name: LiquidTab 2.1.5（fork：掌盟界面恢复 + 小黑盒发布键图标与沉浸）
+          tag_name: v2.1.6
+          name: LiquidTab 2.1.6（fork：掌盟去黑坨+点按身份绑定，小黑盒发布键真独立）
           body: |
-            ## LiquidTab 2.1.5（Yuxiximyxx fork）
+            ## LiquidTab 2.1.6（Yuxiximyxx fork）
 
-            versionName 2.1.5 / versionCode 228。基线仍为 upstream
-            tag v2.1.2 + fork 适配，证书与 2.0.1–2.1.4 相同，
-            可直接覆盖升级。本版修 2.1.4 真机复验的三项问题，
+            versionName 2.1.6 / versionCode 229。基线仍为 upstream
+            tag v2.1.2 + fork 适配，证书与 2.0.1–2.1.5 相同，
+            可直接覆盖升级。本版修 2.1.5 真机复验的三项问题，
             **均为代码层修复，未经真机验证**：
 
-            ### 1. 掌盟界面恢复（2.1.4 回归，优先项）
+            ### 1. 掌盟：玻璃条下方还有黑坨
 
-            根因：2.1.4 的 QtlAdapter 往上三层找「含加号按钮的
-            容器」作导航源，在 12.10.0 上命中的是页面级大容器；
-            共享管线会把源 alpha 置 0 并按源宽等分切片投影，
-            于是整页被隐藏、槽位里画的是整页微缩图（与真机
-            截图一致）。
+            玻璃条正下方居中露出的黑色半圆，是原中间加号按钮
+            （bottom_title_center_btn）的黑色圆形本体。它挂在
+            更高层、不在导航源内（源退回文字行本身时），源的
+            alpha 隐藏罩不到它，于是透过玻璃条下方露出来。
+            本版在 suppress 阶段从窗口根部找到它并置
+            INVISIBLE：只停它自身绘制，不动任何布局（界面
+            完整红线不变）；捕获、圆钮绘制、点按都直接操作
+            视图本体，不受 visibility 影响。
 
-            修法：
-            - 源严格限制为底栏壳层：候选祖先必须高度 ≤168dp
-              且底边与文字行底边对齐（≤12dp），选不到就退回
-              文字行本身；
-            - acceptsNavigationSource 增加高度兜底（>200dp
-              直接拒绝），任何发现路径都选不出页面级容器；
-            - 不再放开内容区 RelativeLayout ABOVE 规则、不再
-              清祖先链背景；去黑带只清底栏装配自身底色加安装
-              器对直接父壳层的通用处理。**若真机上黑带仍有
-              残留，是为保界面完整的主动取舍，后续再议；**
-            - artwork 改逐 tab 叶子捕获：每个 tab 只取内部
-              真实图标（ImageView / 顶部 compound drawable）
-              与文字，加号槽画原生按钮本体，不再用容器切片。
+            ### 2. 掌盟：发布槽之后点按偏一位
 
-            把握程度：根因链（选源过大 → alpha 置 0 → 整页
-            隐藏；等分切片 → 微缩图入槽）已在共享管线代码中
-            逐环坐实，修复针对每一环，界面恢复的把握较大；
-            但宿主 12.10.0 的真实层级未经真机探针，最终以
-            真机为准。
+            真机形态：槽 0/1（首页/好友）正常，槽 3（商城）
+            打开「我的」，槽 4（我的）无反应。根因：旧
+            dispatch 按序号枚举后在 tab 单元上 performClick
+            落空，宿主落回通用兜底路径、按原始下标取文字行
+            子视图——文字行里只有四个页面 tab（加号按钮在
+            更高层），槽 3 恰好取到第四个 tab（我的），槽 4
+            越界。本版改走身份绑定：捕获 artwork 时把每个
+            槽位绑到它捕获到的 tab 视图本体（中间槽绑加号
+            按钮本体），点按只认绑定，并用三级递进保证送达
+            （自身监听 → 内部子视图监听 → 目标中心合成触摸
+            交宿主命中分发），不再落回通用路径。顺带修正
+            entryLabels 第二项为宿主实际文字「好友」（此前
+            推测的「社区」）。
 
-            ### 2. 小黑盒发布按钮补图标
+            ### 3. 小黑盒：发布按钮没有真正独立
 
-            根因：通用绘制路径从不往独立圆钮里画 artwork
-            （四个页面槽之外，发布槽不在绘制列表内；xhs/贴吧
-            均由适配器自绘发布键）。
+            真机截图里主条与独立圆钮之间还有粘连：主条的浅色
+            底板横跨到圆钮下方。此前 barLayout 照 tieba 开了
+            本地光学（localMainOptics/localActionOptics），
+            主条采样节点按 padded 全宽输入录制，底板越过主条
+            右界伸进间隙。本版按 xhs 适配的口径摘掉这三个
+            标志，字段集与 xhs 完全一致：几何不变（主条在
+            圆钮前 12dp 收住），两部分走共享外层玻璃路径、
+            各自 clip 与阴影分别成形。
 
-            修法：HeyboxAdapter 自持绘制
-            （ownsNavigationDrawing），通用投影之后把
-            vg_mid_tab 内部的图标叶子（ImageView）画进圆钮；
-            取不到图标时手绘加号兜底，圆钮不再空白。快照
-            同步改逐槽叶子捕获：普通槽取 RadioButton 顶部
-            compound drawable + 文本（与 BetterHeybox 构建
-            底栏的取图方式一致），中间槽取 vg_mid_tab 图标
-            叶子。
+            ### 复验要点
 
-            ### 3. 小黑盒导航条沉浸
-
-            共享安装器只做到窗口标志与导航条颜色透明，宿主
-            根布局仍按 navigationBars inset 留底，玻璃条下
-            留实色带。本版在适配器 configureNavigationInsets
-            中（照本仓 CainiaoInsets 成法）对含 rg_main 的
-            主界面窗口把导航条底部 inset 清零，内容铺到物理
-            底部；其它页面不做，避免破坏依赖该 inset 的布局
-            （与 BetterHeybox 只在主界面全量沉浸的口径一致）。
-
-            ### 附带核对：小黑盒四个 tab 的几何形图标
-
-            2.1.4 截图中四槽图标为三角/圆/叉/方块。本版捕获
-            已改为直接取 RadioButton 的顶部 compound
-            drawable——宿主真图标的权威来源，BetterHeybox
-            同款取法。若装 2.1.5 后仍是几何形，则说明宿主
-            当前下发的 compound drawable 本身即为该组图形
-            （图标由服务端热更新下发，未到达或回退默认时
-            可能如此），下一步需在真机上关模块作用域、同屏
-            对照原生底栏确认，不要再从模块侧猜。
-
-            ### 复验方法
-
-            - 掌盟：强停重开，首页内容应完整显示，玻璃条浮
-              在底部、图标为各 tab 真图标；发布键圆钮内应有
-              原生加号按钮。
-            - 小黑盒：强停重开，玻璃条下方不应再有实色带、
-              内容应铺到屏幕底部；独立发布键圆钮内应有发布
-              图标；四槽图标对照原生底栏看是否一致。
-            - 微信：2.1.4 的聊天页修复未动，进聊天页确认
-              底部高度无回归。
+            - 掌盟强停重开：玻璃条下方无黑坨；逐个点
+              首页/好友/商城/我的，各归其位；中间发布键与
+              右侧独立圆钮点按有反应。
+            - 小黑盒强停重开：主条与发布圆钮之间有明确
+              间隙、两部分分别成形，不再粘连。
 
             ### 注意
 

@@ -119,6 +119,32 @@ internal object QtlViews {
     }
 }
 
+/**
+ * 槽位 → 真实视图的身份绑定 (2.1.6)。
+ *
+ * 点按错位的教训: 适配器旧 dispatch 按下标算术 (槽位序号减一)
+ * 在运行时重新枚举文字行子视图, 一旦 performClick 在 tab 单元
+ * 上落空 (单元自身无监听、点击由行级触摸处理), 宿主会落回通用
+ * 兜底路径——它按槽位下标直接取文字行第 index 个孩子。文字行
+ * 里只有四个页面 tab (加号按钮在更高层), 于是发布槽之后整体
+ * 偏一位: 槽 3 取到第四个 tab (我的), 槽 4 越界无反应 (真机
+ * 实证)。本绑定在捕获 (artwork 与用户所见槽位同源) 时把每个
+ * 槽位绑到它捕获到的那个 tab 视图本体, dispatch 只认绑定、
+ * 不再算下标。
+ */
+internal object QtlSlotBindings {
+    private val bindings = java.util.WeakHashMap<ViewGroup, Map<Int, View>>()
+
+    fun record(source: ViewGroup, slots: Map<Int, View>) {
+        synchronized(bindings) { bindings[source] = slots }
+    }
+
+    fun lookup(source: ViewGroup?): Map<Int, View>? {
+        if (source == null) return null
+        return synchronized(bindings) { bindings[source] }
+    }
+}
+
 /** 逐 tab 叶子捕获: 见 QtlNavigationState 的类注释。 */
 internal object QtlArtworkCapture {
     private const val SLOT_COUNT = 5
@@ -143,6 +169,14 @@ internal object QtlArtworkCapture {
         if (arts.any { it.label == null && it.iconView == null && it.iconDrawable == null }) {
             return false
         }
+        // 身份绑定: 槽位 → 本次捕获所用的 tab 视图本体 (中间槽
+        // 绑加号按钮本体), 供 dispatchNavigationTap 按身份转发。
+        val bound = HashMap<Int, View>(SLOT_COUNT)
+        tabs.forEachIndexed { ordinal, tab ->
+            bound[if (ordinal < CENTER_INDEX) ordinal else ordinal + 1] = tab
+        }
+        bound[CENTER_INDEX] = button
+        QtlSlotBindings.record(source, bound)
         val canvas = Canvas(target)
         canvas.drawColor(Color.TRANSPARENT, BlendMode.CLEAR)
         val slotWidth = target.width / SLOT_COUNT.toFloat()

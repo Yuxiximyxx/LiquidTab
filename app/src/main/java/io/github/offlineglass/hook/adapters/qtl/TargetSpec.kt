@@ -19,5 +19,5 @@ internal val targetSpec: TargetSpec = TargetSpec("qtl", "com.tencent.qt.qtl", "�
             classHints = setOf("GameHomeActivity"),
             textHints = setOf("首页", "我的"),
             preferredSlots = 5..5, supportsPostButton = true,
-            entryLabels = listOf("首页", "社区", "发布", "商城", "我的"),
+            entryLabels = listOf("首页", "好友", "发布", "商城", "我的"),
             defaultDetachedPublish = true)

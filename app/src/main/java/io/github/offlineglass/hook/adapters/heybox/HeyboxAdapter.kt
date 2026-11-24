@@ -66,7 +66,13 @@ internal object HeyboxAdapter : TargetAdapter {
     override fun barLayout(
         config: GlassConfig, width: Int, height: Int, density: Float, slots: Int,
     ): AdapterBarLayout? {
-        // 与 tieba/xhs 相同的独立发布键几何。
+        // 独立发布键几何与光学口径对齐 xhs (2.1.6): 主条在圆钮
+        // 前一个 gap 处收住, 两部分走共享外层玻璃路径、各自
+        // clip 与阴影分别成形。此前照 tieba 开的本地光学
+        // (localMainOptics/localActionOptics) 会让主条的采样
+        // 节点按 padded 全宽输入录制, 浅色底板横跨到圆钮区域
+        // 与主条粘连 (2.1.5 真机截图橙框), 故摘掉这三个标志,
+        // 与 xhs 的字段集完全一致。
         val gap = 12f * density
         if (!config.detachedPublish || slots != SLOT_COUNT ||
             height <= 0 || width <= height + gap
@@ -81,9 +87,6 @@ internal object HeyboxAdapter : TargetAdapter {
             actionIndex = CENTER_INDEX,
             navigationIndices = navigation,
             actionHighlightScale = 0.35f,
-            localActionOptics = true,
-            localMainOptics = true,
-            actionFillUsesOnlySurfaceOpacity = true,
         )
     }
 
