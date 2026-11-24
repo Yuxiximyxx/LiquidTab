@@ -144,3 +144,30 @@
   scene/webView/ctx」（状态变化时打）。真机若仍黑，导出
   LSPosed 日志看这两行在黑底时段的取值即可定案。
 - 状态：2.1.10 已发布待验，以上均为代码层修复，未经真机验证。
+- 2.1.11：小乐按约导出 2.1.10 的 LSPosed 日志（包
+  LSPosed_20261124_170136），两段会话（PID 13264 /
+  14387）同形态，定案：①artwork 链健康——snapshot
+  commit 恒 committed-leaf、opaque=0.111、装后立即提
+  交；②scene=true（2.1.10 的场景供给命中）、
+  webView=false（活动页 WebView 构成猜测未获支持）；
+  ③断点在实时场景——每次冷启约 8 秒后 backdrop 翻为
+  live=true / displayList=false 且不再恢复，
+  hasUsableBackdrop() 恒 false、条身只剩 surface 填
+  充（夜间近不透明黑）。模块内三处 discardDisplayList
+  均同时清 liveBackdropActive 或为其他包/适配专用，
+  无一能产生该状态；宿主在场景视图自身节点无 list
+  且视图未 dirty 时清扫于 nodes.isEmpty() 处原样返
+  回、永不重录——判定丢失属框架层、宿主无自愈（原生
+  触发点日志不可见，不冒充定案）。同包无 qtl 崩溃/
+  异常、无 census 失败，CfgDiag 约 1 秒一次的后台
+  配置轮询为全天恒在的既有行为，未见卡顿复发迹象。
+  修法只补自愈一环：QtlNavigationState.onHostFrame
+  检测 live && !displayList 持续超 400ms 后，以
+  1.5 秒节流把场景视图 invalidate（逼框架重录其
+  display list、打破死锁）+ 调宿主
+  adapterScheduleBackdropRefresh(120ms) 标脏场景签
+  名迫使重录包装节点；backdrop 日志加 repairs= 计
+  数，恢复行（displayList=true 带 repairs）即自愈闭
+  合的证据。其余链路（捕获/点击/选中/场景供给/透
+  明底色）一律未动。
+- 状态：2.1.11 已发布待验，以上均为代码层修复，未经真机验证。

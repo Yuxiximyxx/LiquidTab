@@ -54,9 +54,9 @@ jobs:
           "$SDK/zipalign" -p -f 4 "$SRC" dist/aligned.apk
           "$SDK/apksigner" sign --ks "$RUNNER_TEMP/liquidtab-release.keystore" \
             --ks-pass env:STORE_PASSWORD --ks-key-alias "$KEY_ALIAS" --key-pass env:KEY_PASSWORD \
-            --out dist/LiquidTab-2.1.10-release.apk dist/aligned.apk
+            --out dist/LiquidTab-2.1.11-release.apk dist/aligned.apk
           rm dist/aligned.apk
-          "$SDK/apksigner" verify --print-certs dist/LiquidTab-2.1.10-release.apk
+          "$SDK/apksigner" verify --print-certs dist/LiquidTab-2.1.11-release.apk
           ls -lh dist
 
       - name: Upload artifact
@@ -69,65 +69,66 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v2.1.10
-          name: LiquidTab 2.1.10（fork：掌盟活动页条身黑底改透明玻璃底色 + 定案日志）
+          tag_name: v2.1.11
+          name: LiquidTab 2.1.11（fork：掌盟黑底日志定案——实时场景丢失后加自愈重录）
           body: |
-            ## LiquidTab 2.1.10（Yuxiximyxx fork）
+            ## LiquidTab 2.1.11（Yuxiximyxx fork）
 
-            versionName 2.1.10 / versionCode 233。基线仍为 upstream
-            tag v2.1.2 + fork 适配，证书与 2.0.1–2.1.9 相同，
-            可直接覆盖升级。本版**只动掌盟（qtl）**，修 2.1.9
-            真机复验时活动页的条身黑底；小黑盒本版不碰。
+            versionName 2.1.11 / versionCode 234。基线仍为 upstream
+            tag v2.1.2 + fork 适配，证书与 2.0.1–2.1.10 相同，
+            可直接覆盖升级。本版**只动掌盟（qtl）**，按 2.1.10
+            导出的 LSPosed 日志定案修黑底；小黑盒本版不碰。
             **均为代码层修复，未经真机验证**：
 
-            ### 本轮定案（先取证再修）
+            ### 日志定案（2.1.10 两段会话，同形态）
 
-            2.1.9 后商城槽位与药丸已正常，但「发现 → 活动」
-            子页上整条仍是近不透明黑底。逐环核对代码 + 截图
-            裁图取证，确定的结论：
+            - artwork 链健康：`snapshot commit` 恒为
+              `result=committed-leaf opaque=0.111 sel=0
+              everCommitted=true`，逐叶快照正常提交，黑不在
+              快照链。
+            - 场景供给命中：`backdrop` 行 `scene=true`；
+              `webView=false`（活动页合成层构成的猜测未获
+              日志支持）。
+            - 断点在实时场景：每次冷启约 8 秒后状态翻为
+              `live=true displayList=false scene=true` 且不再
+              恢复——实时场景包装节点的 display list 丢失，
+              `hasUsableBackdrop()` 恒 false，条身只剩
+              surface 填充，夜间即近不透明黑。模块内三处
+              discardDisplayList 均同时清 live 或为其他包/
+              适配专用，无一能产生该状态；且宿主在场景视图
+              自身节点无 list 且未 dirty 时清扫恒空转、永不
+              重录——丢失属框架层、宿主无自愈（原生触发点
+              日志不可见，不冒充定案）。
+            - 同包无 qtl 崩溃/异常、无 census 失败；CfgDiag
+              约 1 秒一次的后台配置轮询为全天恒在的既有
+              行为，未见卡顿复发迹象。
 
-            - 黑不在导航快照（artwork）链：本页截图里图标/
-              文字/药丸都是逐叶快照的形态，逐叶快照已被正常
-              提交；staged 校验拒收也只会保留上一张好快照，
-              产生不了这块填满面板轮廓的黑。
-            - 条身的黑来自宿主玻璃面板的实时背景场景：场景
-              录制先铺一层底色、再回放页面内容的 RenderNode，
-              底色在夜间解析为不透明黑（逐层找不透明背景、
-              最后落纯黑）。该子页上场景内容覆盖不到条身
-              下部——裁图实证：条身上部约 1/3 有紧邻上方卡片
-              的折射内容，下部约 2/3 是与身后图文无关的平
-              黑——覆盖不到的区域就只剩不透明底色 + 半透明
-              填充，即近不透明黑。
-            - 待日志证实的只剩一环：该页内容为何覆盖不到
-              （疑为合成层回放不可靠的页面构成）。本版新增
-              的 backdrop 状态日志带 WebView 探查位，真机
-              复现时导 LSPosed 日志即可定案。
+            ### 本版修法（只动 qtl，只补自愈一环）
 
-            ### 本版修法（只动 qtl）
-
-            1. 条身改透明玻璃底色：掌盟适配主动供给背景场景
-               （宿主父层下包含导航源的应用根布局，采样集合
-               与默认一致），场景底色随即改走全透明口径，不
-               再用不透明黑。场景内容覆盖不到条身时，条身保
-               持透明玻璃（只画图标文字 + 半透明填充），最坏
-               情况也只是清玻璃，永不落回不透明黑。
-            2. 补定案日志（前缀 [OfflineGlass][QTL]）：
-               「snapshot commit」逐次记录快照提交分类
-               （committed-leaf / committed-generic /
-               rejected-opaque / empty-fallback，含不透明
-               占比与页面上下文）；「backdrop」在背景状态
-               变化时记录 live/displayList/scene/webView。
-               真机若仍黑，看这两行在黑底时段的取值定案。
+            `onHostFrame` 检测到 `live && !displayList` 退化
+            状态持续超过 400ms 后，以 1.5 秒节流自愈：把
+            场景视图 `invalidate()`（逼框架在下一次遍历重
+            录它的 display list，打破「节点无 list + 视图
+            未 dirty」的死锁），并调宿主现成的
+            `adapterScheduleBackdropRefresh` 把场景签名标
+            脏，迫使宿主在后续帧重录包装节点。`backdrop`
+            日志加 `repairs=` 计数：恢复后会打出
+            `displayList=true` 且带 repairs 计数，下次导
+            出即可验证自愈链是否闭合。已验好的部分（首
+            页/商城呈现、点击对位、选中映射、评论贴合）
+            一律未动。
 
             ### 复验要点
 
-            - 掌盟强停重开：切到「发现 → 活动」子页，底栏
-              应为真玻璃（身后内容透得过来），不再整条黑
-              底；首页、商城等其它页面表现不应回退（内容
-              铺底、切换流畅、高亮对位、药丸颜色一致）。
-            - 若活动页仍黑：请导出 LSPosed 日志发回，日志
-              里 [OfflineGlass][QTL] 的 snapshot commit 与
-              backdrop 两行就是定案依据。
+            - 掌盟强停重开：停在首页与「发现 → 活动」子页
+              各看底栏——应为真玻璃、身后内容透得过来，不
+              再整条黑底；切换流畅、高亮对位、药丸颜色
+              一致不应回退。
+            - 若仍黑：请再导出一次 LSPosed 日志发回，看
+              [OfflineGlass][QTL] backdrop 行里 repairs=
+              是否增长、其后有没有 displayList=true 的恢
+              复行，即可判定自愈是否触发、断点是否另有
+              其环。
             - 小黑盒本版未动，无需复验。
 
             ### 注意

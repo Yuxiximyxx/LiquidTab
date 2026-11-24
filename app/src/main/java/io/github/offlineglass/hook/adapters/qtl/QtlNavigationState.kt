@@ -87,6 +87,14 @@ import kotlin.math.min
  * 同时补两条定案日志: 快照提交分类 (snapshot commit) 与
  * 背景状态变化 (backdrop), 真机若仍黑, 导 LSPosed 日志
  * 看这两行即可定案。
+ *
+ * 2.1.11 (黑底日志定案): 小乐按约导出 2.1.10 的 LSPosed
+ * 日志, 两段会话同形态: snapshot commit 恒 committed-leaf
+ * (opaque=0.111, artwork 链健康), scene=true (场景供给命
+ * 中), webView=false; 断点在实时场景——每次冷启约 8 秒
+ * 后 backdrop 翻为 live=true / displayList=false 且不再恢
+ * 复, 条身随之只剩填充。修法见 repairBackdropIfDegraded:
+ * 只补「退化检测 + 标脏重录」的自愈环, 其余链路不动。
  */
 internal class QtlNavigationState(private val host: GlassHostLayout) : AppNavigationState {
 
@@ -102,6 +110,11 @@ internal class QtlNavigationState(private val host: GlassHostLayout) : AppNaviga
     private var lastBackdropLogKey: String? = null
     /** resolveBackdropScene 的缓存 (校验失效才重找)。 */
     private var cachedScene: View? = null
+    // ---- 2.1.11 实时场景自愈状态 ----
+    /** live && !displayList 退化状态的起始时刻 (0 = 当前健康)。 */
+    private var backdropDegradedSinceMs = 0L
+    private var lastBackdropRepairAtMs = 0L
+    private var backdropRepairCount = 0
 
     private companion object {
         /** 普查不完整时推迟捕获的间隔。 */
@@ -112,6 +125,12 @@ internal class QtlNavigationState(private val host: GlassHostLayout) : AppNaviga
         const val REJECT_LOG_INTERVAL_MS = 5_000L
         /** 提交分类日志: 同类结果最短间隔 (分类变化立即打)。 */
         const val COMMIT_LOG_INTERVAL_MS = 30_000L
+        /** 场景退化持续超过此时长才触发自愈 (避开重录瞬间的过渡读数)。 */
+        const val BACKDROP_REPAIR_DWELL_MS = 400L
+        /** 自愈触发的最短间隔 (每次尝试只是一次标脏+invalidate, 开销有界)。 */
+        const val BACKDROP_REPAIR_INTERVAL_MS = 1_500L
+        /** 标脏延迟: 让场景视图的 invalidate 先在遍历里重录出 display list。 */
+        const val BACKDROP_REPAIR_DELAY_MS = 120L
     }
 
     override fun captureNavigation(source: ViewGroup, target: Bitmap): Boolean {
@@ -169,15 +188,63 @@ internal class QtlNavigationState(private val host: GlassHostLayout) : AppNaviga
     override fun onHostFrame(hostView: View) {
         val live = host.liveBackdropActiveForAdapter
         val displayList = host.liveBackdropNodeForAdapter.hasDisplayList()
-        val scene = resolveBackdropScene(hostView) != null
+        val sceneView = resolveBackdropScene(hostView)
+        val scene = sceneView != null
+        val repaired = repairBackdropIfDegraded(live, displayList, sceneView)
         val key = "$live/$displayList/$scene"
-        if (key == lastBackdropLogKey) return
+        if (!repaired && key == lastBackdropLogKey) return
         lastBackdropLogKey = key
         val webView = cachedScene?.let { containsWebView(it) }
         XposedBridge.log(
             "[OfflineGlass][QTL] backdrop: live=$live displayList=$displayList " +
-                "scene=$scene webView=$webView ctx=${contextLabel()}",
+                "scene=$scene webView=$webView repairs=$backdropRepairCount " +
+                "ctx=${contextLabel()}",
         )
+    }
+
+    /**
+     * 实时场景自愈 (2.1.11, 日志定案落点)。
+     *
+     * 小乐导出的 LSPosed 日志 (2.1.10 两段会话) 显示: 黑底
+     * 时段的状态恒为 live=true / displayList=false——实时场
+     * 景包装节点的 display list 丢失, hasUsableBackdrop()
+     * 随之恒 false, 条身只剩 surface 填充 (夜间近不透明
+     * 黑); 而宿主不会自己恢复: 清扫在场景视图自身的节点
+     * 也无 list 且视图未 dirty 时于 nodes.isEmpty() 处原样
+     * 返回, 包装节点永不重录。模块内三处 discardDisplayList
+     * 均同时清 liveBackdropActive 或为其他包/适配专用, 无
+     * 一能产生该状态, 丢失属框架层 (原生触发点日志不可
+     * 见, 不冒充定案)。
+     *
+     * 这里只补自愈这一环: 退化状态持续超过
+     * [BACKDROP_REPAIR_DWELL_MS] 后, 以
+     * [BACKDROP_REPAIR_INTERVAL_MS] 节流做两件事——把场
+     * 景视图 invalidate (逼框架在下一次遍历重录它的
+     * display list, 打破「节点无 list + 视图未 dirty」的
+     * 死锁), 并调 adapterScheduleBackdropRefresh 把场景
+     * 签名标脏, 迫使宿主在后续帧把包装节点重录。恢复后
+     * backdrop 日志会打出 displayList=true 且带 repairs=
+     * 计数, 下次导出可验证自愈链是否闭合。
+     */
+    private fun repairBackdropIfDegraded(
+        live: Boolean, displayList: Boolean, sceneView: View?,
+    ): Boolean {
+        val now = android.os.SystemClock.uptimeMillis()
+        if (!live || displayList) {
+            backdropDegradedSinceMs = 0L
+            return false
+        }
+        if (backdropDegradedSinceMs == 0L) {
+            backdropDegradedSinceMs = now
+            return false
+        }
+        if (now - backdropDegradedSinceMs < BACKDROP_REPAIR_DWELL_MS) return false
+        if (now - lastBackdropRepairAtMs < BACKDROP_REPAIR_INTERVAL_MS) return false
+        lastBackdropRepairAtMs = now
+        backdropRepairCount++
+        sceneView?.invalidate()
+        host.adapterScheduleBackdropRefresh(BACKDROP_REPAIR_DELAY_MS)
+        return true
     }
 
     /** 有界探查子树里是否有可见 WebView (仅状态变化时跑, 上限 800 个视图)。 */
