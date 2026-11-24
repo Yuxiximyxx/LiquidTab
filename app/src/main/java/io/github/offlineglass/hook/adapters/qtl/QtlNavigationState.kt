@@ -93,8 +93,13 @@ import kotlin.math.min
  * (opaque=0.111, artwork 链健康), scene=true (场景供给命
  * 中), webView=false; 断点在实时场景——每次冷启约 8 秒
  * 后 backdrop 翻为 live=true / displayList=false 且不再恢
- * 复, 条身随之只剩填充。修法见 repairBackdropIfDegraded:
- * 只补「退化检测 + 标脏重录」的自愈环, 其余链路不动。
+ * 复, 条身随之只剩填充。2.1.11 先补了「退化检测 + 一
+ * 次性标脏重录」的自愈环, 其余链路不动。
+ *
+ * 2.1.12 (2.1.11 真机日志复盘): 一次性修复被证不闭环——
+ * 会话 A 修复因帧泵枯竭根本没触发 (repairs 恒 0), 会
+ * 话 B 触发一次 (repairs=1) 后无恢复行。自愈改为自驱
+ * 恢复泵, 详见 armBackdropRepairPump 的注释。
  */
 internal class QtlNavigationState(private val host: GlassHostLayout) : AppNavigationState {
 
@@ -110,11 +115,20 @@ internal class QtlNavigationState(private val host: GlassHostLayout) : AppNaviga
     private var lastBackdropLogKey: String? = null
     /** resolveBackdropScene 的缓存 (校验失效才重找)。 */
     private var cachedScene: View? = null
-    // ---- 2.1.11 实时场景自愈状态 ----
+    // ---- 2.1.11/2.1.12 实时场景自愈状态 ----
     /** live && !displayList 退化状态的起始时刻 (0 = 当前健康)。 */
     private var backdropDegradedSinceMs = 0L
-    private var lastBackdropRepairAtMs = 0L
     private var backdropRepairCount = 0
+    /** 恢复泵代次 (arm/停泵时递增, 使已投递的旧 runnable 失效)。 */
+    private var backdropRepairEpisode = 0
+    /** 恢复泵是否已 arm 或正在跑 (同一退化集只 arm 一次)。 */
+    private var backdropRepairLoopActive = false
+    /** 本集恢复泵已跑的轮数。 */
+    private var backdropRepairIterations = 0
+    /** 本集预算已耗尽: 状态恢复前不再重新 arm (防不可恢复时反复打泵)。 */
+    private var backdropRepairExhausted = false
+    /** 上次 backdrop 日志打出的 repairs 值 (变化也要打行)。 */
+    private var lastLoggedRepairCount = -1
 
     private companion object {
         /** 普查不完整时推迟捕获的间隔。 */
@@ -125,12 +139,14 @@ internal class QtlNavigationState(private val host: GlassHostLayout) : AppNaviga
         const val REJECT_LOG_INTERVAL_MS = 5_000L
         /** 提交分类日志: 同类结果最短间隔 (分类变化立即打)。 */
         const val COMMIT_LOG_INTERVAL_MS = 30_000L
-        /** 场景退化持续超过此时长才触发自愈 (避开重录瞬间的过渡读数)。 */
+        /** 场景退化持续超过此时长才 arm 恢复泵 (避开重录瞬间的过渡读数)。 */
         const val BACKDROP_REPAIR_DWELL_MS = 400L
-        /** 自愈触发的最短间隔 (每次尝试只是一次标脏+invalidate, 开销有界)。 */
-        const val BACKDROP_REPAIR_INTERVAL_MS = 1_500L
-        /** 标脏延迟: 让场景视图的 invalidate 先在遍历里重录出 display list。 */
-        const val BACKDROP_REPAIR_DELAY_MS = 120L
+        /** 恢复泵每轮间隔: 一轮遍历重录场景自身 list, 下一轮清扫才命中。 */
+        const val BACKDROP_REPAIR_INTERVAL_MS = 300L
+        /** 恢复泵单集预算 (轮): 12 轮约 3.6 秒, 足够两轮遍历闭环。 */
+        const val BACKDROP_REPAIR_MAX_ITERATIONS = 12
+        /** 每轮标脏延迟: 让宿主的刷新 runnable 在本轮遍历后落点。 */
+        const val BACKDROP_REPAIR_DELAY_MS = 40L
     }
 
     override fun captureNavigation(source: ViewGroup, target: Bitmap): Boolean {
@@ -190,10 +206,20 @@ internal class QtlNavigationState(private val host: GlassHostLayout) : AppNaviga
         val displayList = host.liveBackdropNodeForAdapter.hasDisplayList()
         val sceneView = resolveBackdropScene(hostView)
         val scene = sceneView != null
-        val repaired = repairBackdropIfDegraded(live, displayList, sceneView)
+        if (!displayList) {
+            // 退化 (含 live 被清扫瞬时清掉的中间态): arm 恢复泵。
+            // 正常冷启的短暂无 list 由启动器到期自查兜住, 不产
+            // 生实际泵轮 (见 runBackdropRepairPump 的自查)。
+            armBackdropRepairPump()
+        } else {
+            // 已恢复: 停泵、清耗尽闩, 本集结束。
+            if (backdropRepairLoopActive) stopBackdropRepairPump()
+            backdropRepairExhausted = false
+        }
         val key = "$live/$displayList/$scene"
-        if (!repaired && key == lastBackdropLogKey) return
+        if (key == lastBackdropLogKey && backdropRepairCount == lastLoggedRepairCount) return
         lastBackdropLogKey = key
+        lastLoggedRepairCount = backdropRepairCount
         val webView = cachedScene?.let { containsWebView(it) }
         XposedBridge.log(
             "[OfflineGlass][QTL] backdrop: live=$live displayList=$displayList " +
@@ -203,48 +229,95 @@ internal class QtlNavigationState(private val host: GlassHostLayout) : AppNaviga
     }
 
     /**
-     * 实时场景自愈 (2.1.11, 日志定案落点)。
+     * 实时场景自愈 (2.1.11 一次性修复, 2.1.12 换恢复泵)。
      *
-     * 小乐导出的 LSPosed 日志 (2.1.10 两段会话) 显示: 黑底
-     * 时段的状态恒为 live=true / displayList=false——实时场
-     * 景包装节点的 display list 丢失, hasUsableBackdrop()
-     * 随之恒 false, 条身只剩 surface 填充 (夜间近不透明
-     * 黑); 而宿主不会自己恢复: 清扫在场景视图自身的节点
-     * 也无 list 且视图未 dirty 时于 nodes.isEmpty() 处原样
-     * 返回, 包装节点永不重录。模块内三处 discardDisplayList
-     * 均同时清 liveBackdropActive 或为其他包/适配专用, 无
-     * 一能产生该状态, 丢失属框架层 (原生触发点日志不可
-     * 见, 不冒充定案)。
+     * 2.1.11 的真机日志 (2026-11-25 00:01 导出, 两段会话)
+     * 证明一次性修复不闭环:
+     * - 会话 A (23:57:01 起): 23:57:05.458 翻为
+     *   live=true/displayList=false 后, 直到进程重启
+     *   (23:59:07) 再无任何 backdrop 行、repairs 恒 0——
+     *   修复的触发点 onHostFrame 只在 pre-draw 跑, 静态
+     *   页不再出帧, 驻留判定永远等不到下一帧, 修复根本
+     *   没触发; 小乐 23:59:00 的黑底截图正落在此区间。
+     * - 会话 B (23:59:07 起): 23:59:43.775 翻转,
+     *   23:59:44.190 repairs=1 (一次性修复触发过一次),
+     *   此后直到导出 (00:01:42) 无 displayList=true 恢
+     *   复行、repairs 不再涨——单次 invalidate+标脏只保
+     *   证一帧遍历, 而那一帧的 pre-draw 清扫跑在场景视
+     *   图于 draw 阶段重录自身 list 之前, 仍然扑空; 之
+     *   后无帧, 机制既不能确认恢复也不能重试。
+     * 两段 snapshot commit 恒 committed-leaf, artwork
+     * 链健康 (会话 B 一次 rejected-opaque 是通用兜底被
+     * 拒、逐叶图保留), 黑底与快照无关。
      *
-     * 这里只补自愈这一环: 退化状态持续超过
-     * [BACKDROP_REPAIR_DWELL_MS] 后, 以
-     * [BACKDROP_REPAIR_INTERVAL_MS] 节流做两件事——把场
-     * 景视图 invalidate (逼框架在下一次遍历重录它的
-     * display list, 打破「节点无 list + 视图未 dirty」的
-     * 死锁), 并调 adapterScheduleBackdropRefresh 把场景
-     * 签名标脏, 迫使宿主在后续帧把包装节点重录。恢复后
-     * backdrop 日志会打出 displayList=true 且带 repairs=
-     * 计数, 下次导出可验证自愈链是否闭合。
+     * 2.1.12 改为自驱恢复泵, 不依赖环境帧:
+     * - onHostFrame 首次观察到退化即 arm: 投递一个
+     *   [BACKDROP_REPAIR_DWELL_MS] 的启动 runnable (主
+     *   线程 Handler, 与帧无关), 到期直接读宿主状态确
+     *   认仍退化才开泵——会话 A 那种「观察到翻转后帧
+     *   泵枯竭」的形态也能启动。
+     * - 泵每 [BACKDROP_REPAIR_INTERVAL_MS] 一轮: 场景
+     *   视图 invalidate + adapterScheduleBackdropRefresh
+     *   标脏签名并逼一帧遍历。第 N 轮遍历在 draw 阶段
+     *   重录场景自身 list, 第 N+1 轮的 pre-draw 清扫即
+     *   可命中并重录包装节点 (签名已标脏, sceneChanged
+     *   成立), 两轮遍历由泵自己保证, 不等用户交互。
+     * - 每轮 repairs++ 并自查 hasDisplayList: 恢复即
+     *   停泵 (onHostFrame 也会打出带 repairs 的
+     *   displayList=true 恢复行); 单集预算
+     *   [BACKDROP_REPAIR_MAX_ITERATIONS] 轮, 超预算停
+     *   泵、本集不再重启 (状态恢复后才可重新 arm),
+     *   避免场景真不可恢复时无限打泵。
      */
-    private fun repairBackdropIfDegraded(
-        live: Boolean, displayList: Boolean, sceneView: View?,
-    ): Boolean {
-        val now = android.os.SystemClock.uptimeMillis()
-        if (!live || displayList) {
-            backdropDegradedSinceMs = 0L
-            return false
-        }
+    private fun armBackdropRepairPump() {
         if (backdropDegradedSinceMs == 0L) {
-            backdropDegradedSinceMs = now
-            return false
+            backdropDegradedSinceMs = android.os.SystemClock.uptimeMillis()
         }
-        if (now - backdropDegradedSinceMs < BACKDROP_REPAIR_DWELL_MS) return false
-        if (now - lastBackdropRepairAtMs < BACKDROP_REPAIR_INTERVAL_MS) return false
-        lastBackdropRepairAtMs = now
+        if (backdropRepairLoopActive || backdropRepairExhausted) return
+        backdropRepairLoopActive = true
+        backdropRepairIterations = 0
+        val episode = ++backdropRepairEpisode
+        host.postDelayed({
+            if (episode != backdropRepairEpisode || !backdropRepairLoopActive) return@postDelayed
+            runBackdropRepairPump(episode)
+        }, BACKDROP_REPAIR_DWELL_MS)
+    }
+
+    private fun stopBackdropRepairPump() {
+        backdropRepairLoopActive = false
+        backdropDegradedSinceMs = 0L
+        backdropRepairEpisode++
+    }
+
+    private fun runBackdropRepairPump(episode: Int) {
+        if (episode != backdropRepairEpisode || !backdropRepairLoopActive) return
+        if (!host.isAttachedToWindow) {
+            stopBackdropRepairPump()
+            return
+        }
+        // 直接读宿主状态自查: 只认包装节点 list——恢复即停,
+        // 不等下一帧的 onHostFrame。不能用 live 作停泵条件:
+        // 恢复途中清扫的空节点分支会把 live 瞬时置 false,
+        // 那是恢复序列的中间态, 误停会把泵掐死在半路。
+        if (host.liveBackdropNodeForAdapter.hasDisplayList()) {
+            stopBackdropRepairPump()
+            return
+        }
+        if (backdropRepairIterations >= BACKDROP_REPAIR_MAX_ITERATIONS) {
+            // 预算耗尽仍未恢复: 停泵并落耗尽闩, 本集不再重启
+            // (日志里 repairs 停涨 + 无恢复行即此形态, 断点另有其环)。
+            backdropRepairExhausted = true
+            stopBackdropRepairPump()
+            return
+        }
+        backdropRepairIterations++
         backdropRepairCount++
-        sceneView?.invalidate()
+        resolveBackdropScene(host)?.invalidate()
         host.adapterScheduleBackdropRefresh(BACKDROP_REPAIR_DELAY_MS)
-        return true
+        host.postDelayed({
+            if (episode != backdropRepairEpisode) return@postDelayed
+            runBackdropRepairPump(episode)
+        }, BACKDROP_REPAIR_INTERVAL_MS)
     }
 
     /** 有界探查子树里是否有可见 WebView (仅状态变化时跑, 上限 800 个视图)。 */

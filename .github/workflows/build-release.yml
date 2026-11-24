@@ -54,9 +54,9 @@ jobs:
           "$SDK/zipalign" -p -f 4 "$SRC" dist/aligned.apk
           "$SDK/apksigner" sign --ks "$RUNNER_TEMP/liquidtab-release.keystore" \
             --ks-pass env:STORE_PASSWORD --ks-key-alias "$KEY_ALIAS" --key-pass env:KEY_PASSWORD \
-            --out dist/LiquidTab-2.1.11-release.apk dist/aligned.apk
+            --out dist/LiquidTab-2.1.12-release.apk dist/aligned.apk
           rm dist/aligned.apk
-          "$SDK/apksigner" verify --print-certs dist/LiquidTab-2.1.11-release.apk
+          "$SDK/apksigner" verify --print-certs dist/LiquidTab-2.1.12-release.apk
           ls -lh dist
 
       - name: Upload artifact
@@ -69,66 +69,66 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v2.1.11
-          name: LiquidTab 2.1.11（fork：掌盟黑底日志定案——实时场景丢失后加自愈重录）
+          tag_name: v2.1.12
+          name: LiquidTab 2.1.12（fork：掌盟黑底二轮日志定案——自愈换自驱恢复泵）
           body: |
-            ## LiquidTab 2.1.11（Yuxiximyxx fork）
+            ## LiquidTab 2.1.12（Yuxiximyxx fork）
 
-            versionName 2.1.11 / versionCode 234。基线仍为 upstream
-            tag v2.1.2 + fork 适配，证书与 2.0.1–2.1.10 相同，
-            可直接覆盖升级。本版**只动掌盟（qtl）**，按 2.1.10
-            导出的 LSPosed 日志定案修黑底；小黑盒本版不碰。
+            versionName 2.1.12 / versionCode 235。基线仍为 upstream
+            tag v2.1.2 + fork 适配，证书与 2.0.1–2.1.11 相同，
+            可直接覆盖升级。本版**只动掌盟（qtl）**，按 2.1.11
+            的真机日志复盘换恢复机制；小黑盒本版不碰。
             **均为代码层修复，未经真机验证**：
 
-            ### 日志定案（2.1.10 两段会话，同形态）
+            ### 日志复盘（2.1.11 两段会话）
 
-            - artwork 链健康：`snapshot commit` 恒为
-              `result=committed-leaf opaque=0.111 sel=0
-              everCommitted=true`，逐叶快照正常提交，黑不在
-              快照链。
-            - 场景供给命中：`backdrop` 行 `scene=true`；
-              `webView=false`（活动页合成层构成的猜测未获
-              日志支持）。
-            - 断点在实时场景：每次冷启约 8 秒后状态翻为
-              `live=true displayList=false scene=true` 且不再
-              恢复——实时场景包装节点的 display list 丢失，
-              `hasUsableBackdrop()` 恒 false，条身只剩
-              surface 填充，夜间即近不透明黑。模块内三处
-              discardDisplayList 均同时清 live 或为其他包/
-              适配专用，无一能产生该状态；且宿主在场景视图
-              自身节点无 list 且未 dirty 时清扫恒空转、永不
-              重录——丢失属框架层、宿主无自愈（原生触发点
-              日志不可见，不冒充定案）。
-            - 同包无 qtl 崩溃/异常、无 census 失败；CfgDiag
-              约 1 秒一次的后台配置轮询为全天恒在的既有
-              行为，未见卡顿复发迹象。
+            - `snapshot commit` 两段恒 `committed-leaf`
+              （会话 B 一次 `rejected-opaque` 是通用兜底被
+              拒、逐叶图保留），artwork 链健康，黑与快照
+              无关。
+            - 会话 A（23:57:01 起）：`23:57:05.458` 翻为
+              `live=true displayList=false` 后，直到进程
+              重启（23:59:07）再无任何 backdrop 行、
+              `repairs=0`——2.1.11 修复的触发点只在
+              pre-draw 跑，静态页帧泵枯竭，修复根本没触
+              发；黑底截图（23:59:00）正落在此区间。
+            - 会话 B（23:59:07 起）：`23:59:43.775` 翻
+              转，`23:59:44.190 repairs=1`（一次性修复触
+              发过一次），此后直到导出（00:01:42）无
+              `displayList=true` 恢复行、repairs 不再涨
+              ——单次 invalidate+标脏只保证一帧遍历，而
+              该帧 pre-draw 清扫跑在场景视图 draw 阶段重
+              录自身 list 之前仍扑空，之后无帧、无从重试。
 
-            ### 本版修法（只动 qtl，只补自愈一环）
+            ### 本版修法（只动 qtl，换恢复机制）
 
-            `onHostFrame` 检测到 `live && !displayList` 退化
-            状态持续超过 400ms 后，以 1.5 秒节流自愈：把
-            场景视图 `invalidate()`（逼框架在下一次遍历重
-            录它的 display list，打破「节点无 list + 视图
-            未 dirty」的死锁），并调宿主现成的
-            `adapterScheduleBackdropRefresh` 把场景签名标
-            脏，迫使宿主在后续帧重录包装节点。`backdrop`
-            日志加 `repairs=` 计数：恢复后会打出
-            `displayList=true` 且带 repairs 计数，下次导
-            出即可验证自愈链是否闭合。已验好的部分（首
-            页/商城呈现、点击对位、选中映射、评论贴合）
-            一律未动。
+            自愈改为**自驱恢复泵**，不依赖环境帧：
+            onHostFrame 首次观察到退化即 arm 一个 Handler
+            投递的 400ms 启动器（与帧无关），到期直接读
+            宿主状态确认仍退化才开泵；泵每 300ms 一轮
+            （场景视图 invalidate + 标脏刷新逼遍历）——
+            第 N 轮遍历在 draw 阶段重录场景自身 list，
+            第 N+1 轮的 pre-draw 清扫即可命中并重录包
+            装节点。泵自查恢复即停，单集预算 12 轮，耗
+            尽落闩、本集不再重启；每轮 `repairs++`，且
+            backdrop 日志改为 repairs 变化也打行，泵的
+            工作过程在日志里全程可见。已验好的部分
+            （首页/商城呈现、点击对位、选中映射、评论
+            贴合）一律未动。
 
             ### 复验要点
 
             - 掌盟强停重开：停在首页与「发现 → 活动」子页
               各看底栏——应为真玻璃、身后内容透得过来，不
-              再整条黑底；切换流畅、高亮对位、药丸颜色
-              一致不应回退。
+              再整条黑底；**这次请在黑底出现后原地停留十
+              几秒不操作**，恢复泵不依赖滑动出帧，停住也
+              应自行恢复。
             - 若仍黑：请再导出一次 LSPosed 日志发回，看
-              [OfflineGlass][QTL] backdrop 行里 repairs=
-              是否增长、其后有没有 displayList=true 的恢
-              复行，即可判定自愈是否触发、断点是否另有
-              其环。
+              [OfflineGlass][QTL] backdrop 行里 repairs
+              是否涨到 12（泵跑满）、其后有没有
+              displayList=true 恢复行——涨满仍不恢复说明
+              断点另有其环；repairs 恒 0 说明 arm 都没成
+              立，同样可据此定案。
             - 小黑盒本版未动，无需复验。
 
             ### 注意
