@@ -46,7 +46,11 @@ internal class HeyboxNavigationState(private val host: GlassHostLayout) : AppNav
         val cy = frame.height / 2f
         val radius = layout.actionSize / 2f
         val source = host.navigationSource ?: return
-        val mid = HeyboxViews.findByEntryName(source, HeyboxViews.MID_TAB_ID)
+        // vg_mid_tab 移入后就是源的直接子视图, 先直查子层,
+        // 免得每帧绘制都重跑按资源名的子树查找 (2.1.8)。
+        val mid = (0 until source.childCount).map(source::getChildAt)
+            .firstOrNull { HeyboxViews.entryName(it) == HeyboxViews.MID_TAB_ID }
+            ?: HeyboxViews.findByEntryName(source, HeyboxViews.MID_TAB_ID)
             ?: source.rootView?.let { HeyboxViews.findByEntryName(it, HeyboxViews.MID_TAB_ID) }
         var drawn = false
         if (mid != null && mid.width > 0 && mid.height > 0) {

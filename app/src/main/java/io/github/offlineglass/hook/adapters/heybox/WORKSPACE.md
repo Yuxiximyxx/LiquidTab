@@ -71,3 +71,17 @@
   的底色，给其外层至多两层非全屏容器铺同色，使输入区与键
   盘连成整块；不动任何布局参数。
 - 状态：2.1.7 已发布待验，以上均为代码层修复，未经真机验证。
+- 2.1.8：①带子与掌盟同根（内容 ABOVE 预留未铺底）；本
+  适配旧 extendContentUnderBar 只摘 ABOVE、漏了华为健康
+  配方里的高度 MATCH_PARENT 一步，且靠锚点 id 等于
+  rg_main 才命中。本版换成与掌盟同口径的
+  releaseContentAbove（摘 ABOVE + MATCH_PARENT，高度
+  占父高四成以上的内容判别），并按 BetterHeybox 当年可
+  用实现补一条按名放开 fl_container 的路径
+  （releaseNamedContent，不猜锚点）。②suppress 同步一
+  次性化：全量解析（内容放开/容器清理/兄弟薄层扫描）每
+  源一次并缓存（ChromeCache），每帧只复清缓存视图，父
+  层子视图数变化或重绑才重解析；drawPublish 的
+  vg_mid_tab 改先直查源的直接子层。评论输入框贴合
+  （2.1.7）未动。
+- 状态：2.1.8 已发布待验，以上均为代码层修复，未经真机验证。

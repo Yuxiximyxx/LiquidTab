@@ -64,3 +64,25 @@
   集与 xhs 对齐——本地光学曾在圆钮外录出大号浅色底板；同
   时①清掉容器背景后，间隙露出的是真实内容而非主题条带。
 - 状态：2.1.7 已发布待验，以上均为代码层修复，未经真机验证。
+- 2.1.8：①带子第三次定位（换方法，先与微信/xhs 做完整
+  diff）：带子不是任何一层背景，而是内容被 RelativeLayout
+  的 ABOVE 规则顶在底栏装配上方、没铺进装配占位区，占位
+  区透出根布局/窗口主题背景（浅色白/夜间黑，录屏像素实
+  测内容在约 91% 屏高处全宽齐断、下方约 80dp 纯主题色）；
+  间隙里的「白色连接」是同一条带露出。2.1.5–2.1.7 只清背
+  景从未动约束，故三版皆在；2.1.4 的放开系被整页空白回
+  归（选源问题）连带回退。本版按仓内华为健康已验证配方
+  放开：逐层向上在每个 RelativeLayout 祖先里，把以 ABOVE
+  顶在底栏链/底带锚点上方、高度占父高四成以上的内容摘
+  ABOVE + 高度设 MATCH_PARENT（releaseContentAbove，
+  一次性、进缓存每帧复断言，带 XposedBridge 日志可查是
+  否命中）。②卡顿：宿主每 pre-draw 帧调 suppress、每
+  dispatchDraw 帧调 resolveSelectedIndex，旧实现每帧多
+  趟全树 DFS（hideLeakedCenterButton 从窗口根按资源名全
+  窗找）+ 逐视图 drawableState 分配；本版 suppress 全量
+  解析每源一次并缓存（ChromeCache，失效/重绑才重跑），
+  每帧只复清缓存视图；resolveSelectedIndex 改走
+  QtlSlotBindings 身份绑定、strongScore 命中即停、
+  drawableScore 仅无强信号时跑；drawPublish 的圆钮本体
+  也先查绑定。点击对位与选中映射口径未动。
+- 状态：2.1.8 已发布待验，以上均为代码层修复，未经真机验证。

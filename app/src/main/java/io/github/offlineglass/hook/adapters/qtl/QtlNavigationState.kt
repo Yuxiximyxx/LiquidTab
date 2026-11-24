@@ -52,15 +52,56 @@ internal class QtlNavigationState(private val host: GlassHostLayout) : AppNaviga
      */
     override fun resolveSelectedIndex(source: ViewGroup?, slotCount: Int): Int? {
         val src = source ?: return null
+        if (slotCount != QtlViews.SLOT_COUNT) return null
+        // 首选 (2.1.8): 捕获时记录的身份绑定 (槽位 → tab 本体),
+        // 与 artwork/点按同源。本判定被宿主在每个 dispatchDraw
+        // 帧调用, 旧实现每帧重跑「按资源名找文字行 + 四个 tab
+        // 子树全量打分 (含逐视图 drawableState 数组分配)」, 是
+        // 切换卡顿的另一半来源; 现只读绑定里的四个 tab 本体。
+        val bound = QtlSlotBindings.lookup(src)
+        if (bound != null) {
+            val tabs = ArrayList<View>(QtlViews.SLOT_COUNT - 1)
+            var complete = true
+            for (slot in intArrayOf(0, 1, 3, 4)) {
+                val view = bound[slot]
+                if (view == null || !view.isAttachedToWindow) {
+                    complete = false
+                    break
+                }
+                tabs += view
+            }
+            if (complete) return scoreTabs(tabs)
+        }
+        return fallbackResolve(src)
+    }
+
+    /** 绑定缺失/失效时的旧口径枚举 (捕获前或源重建时)。 */
+    private fun fallbackResolve(src: ViewGroup): Int? {
         val row = QtlViews.findByEntryName(src, QtlViews.TAB_ROW_ID) as? ViewGroup
             ?: return null
         val tabs = (0 until row.childCount).map(row::getChildAt)
             .filter { it.visibility != View.GONE && QtlViews.hasText(it) }
-        if (tabs.size != QtlViews.SLOT_COUNT - 1 || slotCount != QtlViews.SLOT_COUNT) return null
+        if (tabs.size != QtlViews.SLOT_COUNT - 1) return null
+        return scoreTabs(tabs)
+    }
+
+    private fun scoreTabs(tabs: List<View>): Int? {
+        val scores = IntArray(tabs.size)
+        var anyStrong = false
+        tabs.forEachIndexed { ordinal, tab ->
+            scores[ordinal] = strongScore(tab)
+            if (scores[ordinal] > 0) anyStrong = true
+        }
+        if (!anyStrong) {
+            // 没有强信号时才退到 drawable 状态打分: drawableState
+            // 每视图都新分配一个状态数组, 只在必要时才付这笔钱。
+            tabs.forEachIndexed { ordinal, tab ->
+                scores[ordinal] = drawableScore(tab)
+            }
+        }
         var bestOrdinal = -1
         var bestScore = 0
-        tabs.forEachIndexed { ordinal, tab ->
-            val score = selectionScore(tab)
+        scores.forEachIndexed { ordinal, score ->
             if (score > bestScore) {
                 bestScore = score
                 bestOrdinal = ordinal
@@ -70,17 +111,35 @@ internal class QtlNavigationState(private val host: GlassHostLayout) : AppNaviga
         return if (bestOrdinal < QtlViews.CENTER_INDEX) bestOrdinal else bestOrdinal + 1
     }
 
-    private fun selectionScore(root: View): Int {
+    /** 强信号: isSelected 子树内命中即停; isActivated 次之。 */
+    private fun strongScore(root: View): Int {
         var score = 0
         val stack = ArrayDeque<Pair<View, Int>>()
         stack += root to 0
         while (stack.isNotEmpty()) {
             val (view, depth) = stack.removeLast()
             if (view.isShown) {
-                if (view.isSelected) score += 100
-                if (view.isActivated) score += 80
-                if (view.drawableState.contains(android.R.attr.state_selected)) score += 60
+                if (view.isSelected) return 100
+                if (view.isActivated) score = maxOf(score, 80)
             }
+            if (view is ViewGroup && depth < 6) {
+                for (index in 0 until view.childCount) {
+                    stack += view.getChildAt(index) to (depth + 1)
+                }
+            }
+        }
+        return score
+    }
+
+    private fun drawableScore(root: View): Int {
+        var score = 0
+        val stack = ArrayDeque<Pair<View, Int>>()
+        stack += root to 0
+        while (stack.isNotEmpty()) {
+            val (view, depth) = stack.removeLast()
+            if (view.isShown &&
+                view.drawableState.contains(android.R.attr.state_selected)
+            ) score += 60
             if (view is ViewGroup && depth < 6) {
                 for (index in 0 until view.childCount) {
                     stack += view.getChildAt(index) to (depth + 1)
@@ -100,7 +159,11 @@ internal class QtlNavigationState(private val host: GlassHostLayout) : AppNaviga
         val cx = layout.actionLeft + layout.actionSize / 2f
         val cy = frame.height / 2f
         val radius = layout.actionSize / 2f
-        val button = host.navigationSource?.let { QtlViews.findCenterButton(it) }
+        // 圆钮本体优先取身份绑定 (捕获时记录), 免得每帧绘制
+        // 都重跑按资源名的子树/全窗查找 (2.1.8)。
+        val button = QtlSlotBindings.lookup(host.navigationSource)
+            ?.get(QtlViews.CENTER_INDEX)
+            ?: host.navigationSource?.let { QtlViews.findCenterButton(it) }
         var drawn = false
         if (button != null && button.width > 0 && button.height > 0) {
             canvas.save()

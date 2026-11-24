@@ -12,6 +12,7 @@ import io.github.offlineglass.hook.NavigationCandidate
 import io.github.offlineglass.hook.adapters.AdapterBarLayout
 import io.github.offlineglass.hook.adapters.AppNavigationState
 import io.github.offlineglass.hook.adapters.TargetAdapter
+import io.github.offlineglass.hook.compat.XposedBridge
 import io.github.offlineglass.hook.compat.callbacks.XC_LoadPackage
 import io.github.offlineglass.targets.TargetSpec
 
@@ -28,12 +29,20 @@ import io.github.offlineglass.targets.TargetSpec
  * 本适配把 vg_mid_tab 移入 rg_main 占位处, 使五个槽位的
  * artwork/点按/显隐都回到同一索引空间, 并放开 ABOVE 规则
  * 让内容铺到屏幕底部。
+ *
+ * 2.1.8: 带子定位修正——旧放开只摘 ABOVE、漏了高度设
+ * MATCH_PARENT 一步 (华为健康已验证配方是两步), 内容没
+ * 真正伸到底, 占位区透出根背景成带; 本版两步齐做, 并按
+ * BetterHeybox 当年口径按名放开 fl_container (见
+ * releaseContentAbove / releaseNamedContent)。suppress
+ * 同步改每源一次全量解析 + 缓存复清 (见 ChromeCache)。
  */
 internal object HeyboxAdapter : TargetAdapter {
     override val key = "heybox"
 
     private const val BAR_ID = "rg_main"
     private const val MID_TAB_ID = "vg_mid_tab"
+    private const val CONTENT_ID = "fl_container"
     private const val PLACEHOLDER_ID = "rb_3"
     private const val CENTER_INDEX = 2
     private const val SLOT_COUNT = 5
@@ -101,31 +110,96 @@ internal object HeyboxAdapter : TargetAdapter {
     override fun prepareNavigationSource(navigation: ViewGroup, density: Float) =
         integrateMidTab(navigation)
 
-    override fun suppressNativeBottomChrome(navigation: ViewGroup) {
-        stripChrome(navigation)
-        navigation.post { runCatching { stripChrome(navigation) } }
-    }
+    /**
+     * suppress 的解析结果缓存 (2.1.8, 与掌盟同口径): 宿主每个
+     * pre-draw 帧都会调 suppress, 旧实现每帧重跑兄弟矩形扫描、
+     * getLocationInWindow 与规则遍历。现改为每个源只做一次
+     * 全量解析, 之后每帧只对缓存引用做 O(1) 复清/复断言;
+     * 父层子视图数变化 (底栏热更新增删视图) 或重绑时才重解析。
+     */
+    private class ChromeCache(
+        val parent: ViewGroup?,
+        val parentChildCount: Int,
+        val containers: List<View>,
+        val thinSiblings: List<View>,
+        val released: List<View>,
+        val guards: Map<ViewGroup, Int>,
+    )
+
+    private val chromeCaches = java.util.WeakHashMap<ViewGroup, ChromeCache>()
+
+    override fun suppressNativeBottomChrome(navigation: ViewGroup) =
+        stripChrome(navigation, force = false)
 
     override fun suppressNativeBottomChromeOnRebind(navigation: ViewGroup) {
         // 底栏热更新可能把 vg_mid_tab 重新挂回根布局, 重绑时复查。
         integrateMidTab(navigation)
-        stripChrome(navigation)
+        synchronized(chromeCaches) { chromeCaches.remove(navigation) }
+        stripChrome(navigation, force = true)
     }
 
-    private fun stripChrome(navigation: ViewGroup) {
+    private fun stripChrome(navigation: ViewGroup, force: Boolean) {
+        val cached = synchronized(chromeCaches) { chromeCaches[navigation] }
+        if (!force && cached != null && cacheValid(navigation, cached)) {
+            // 轻量复清: 只碰缓存视图本身, 不遍历任何树。
+            clearChrome(navigation)
+            cached.containers.forEach { clearChrome(it) }
+            cached.thinSiblings.forEach { clearChrome(it) }
+            cached.released.forEach { reassertReleased(it) }
+            return
+        }
+        // 全量解析 (每源一次, 或缓存失效/重绑时)。
         clearChrome(navigation)
-        extendContentUnderBar(navigation)
-        stripBarContainer(navigation)
-        // 根布局里落在底栏带内的兄弟视图 (阴影层/背景条等) 一并
-        // 清掉底色; 内容与底栏本体不在此列。2.1.7: 判定带从
-        // 「与 rg_main 矩形相交」放宽为「整条底栏带」(左右到根
-        // 布局两边、向下到根布局底边)——原底栏背景条若只挂在
-        // 底栏下方 (导航 inset 区) 或间隙正后方, 旧判定够不着,
-        // 它会留在间隙里把主条与圆钮视觉上连成一片 (2.1.6 后
-        // 真机截图的白色连接)。高度上限同步放宽到 3 倍栏高,
-        // 仍只清薄层, 不碰内容级视图。
+        val (released, guards) = releaseContentAbove(navigation)
+        val named = releaseNamedContent(navigation)
+        val containers = stripBarContainer(navigation)
+        val thinSiblings = sweepThinSiblings(navigation)
+        val parent = navigation.parent as? ViewGroup
+        synchronized(chromeCaches) {
+            chromeCaches[navigation] = ChromeCache(
+                parent,
+                parent?.childCount ?: -1,
+                containers,
+                thinSiblings,
+                released + listOfNotNull(named),
+                guards,
+            )
+        }
+    }
+
+    private fun cacheValid(navigation: ViewGroup, cache: ChromeCache): Boolean {
+        val parent = navigation.parent as? ViewGroup
+        if (parent !== cache.parent) return false
+        if (parent != null && parent.childCount != cache.parentChildCount) return false
+        if (cache.containers.any { !isDescendant(navigation, it) }) return false
+        return cache.guards.all { (p, count) -> p.childCount == count }
+    }
+
+    /** 内容的 ABOVE 若被宿主重设, 在轻量复清里直接复断言。 */
+    private fun reassertReleased(child: View) {
         runCatching {
-            val parent = navigation.parent as? ViewGroup ?: return
+            val params = child.layoutParams as? RelativeLayout.LayoutParams ?: return
+            if (params.getRule(RelativeLayout.ABOVE) != 0 ||
+                params.height != ViewGroup.LayoutParams.MATCH_PARENT
+            ) {
+                params.removeRule(RelativeLayout.ABOVE)
+                params.height = ViewGroup.LayoutParams.MATCH_PARENT
+                child.layoutParams = params
+            }
+        }
+    }
+
+    /**
+     * 根布局里落在底栏带内的兄弟薄层 (阴影层/背景条等) 清掉
+     * 底色, 返回清过的视图供缓存复清; 内容与底栏本体不在此
+     * 列。2.1.7: 判定带从「与 rg_main 矩形相交」放宽为「整条
+     * 底栏带」(左右到根布局两边、向下到根布局底边), 高度
+     * 上限 3 倍栏高, 仍只清薄层, 不碰内容级视图。
+     */
+    private fun sweepThinSiblings(navigation: ViewGroup): List<View> {
+        val cleared = ArrayList<View>()
+        runCatching {
+            val parent = navigation.parent as? ViewGroup ?: return@runCatching
             val barRect = android.graphics.Rect()
             navigation.getGlobalVisibleRect(barRect)
             val stripRect = android.graphics.Rect(barRect)
@@ -138,7 +212,7 @@ internal object HeyboxAdapter : TargetAdapter {
             for (index in 0 until parent.childCount) {
                 val sibling = parent.getChildAt(index)
                 if (sibling === navigation || entryName(sibling) == MID_TAB_ID) continue
-                if (entryName(sibling) == "fl_container" || entryName(sibling) == "vg_tips" ||
+                if (entryName(sibling) == CONTENT_ID || entryName(sibling) == "vg_tips" ||
                     entryName(sibling) == "vg_fullscreen_video_container"
                 ) continue
                 val rect = android.graphics.Rect()
@@ -146,9 +220,11 @@ internal object HeyboxAdapter : TargetAdapter {
                     android.graphics.Rect.intersects(rect, stripRect)
                 ) {
                     clearChrome(sibling)
+                    cleared += sibling
                 }
             }
         }
+        return cleared
     }
 
     /**
@@ -157,7 +233,8 @@ internal object HeyboxAdapter : TargetAdapter {
      * 量级 (≤260dp)、宽度不小于底栏的祖先; vg_main_root 是
      * 全屏根布局, 高度远超上限, 天然跳过。只清背景, 不动布局。
      */
-    private fun stripBarContainer(navigation: ViewGroup) {
+    private fun stripBarContainer(navigation: ViewGroup): List<View> {
+        val cleared = ArrayList<View>()
         runCatching {
             val density = navigation.resources.displayMetrics.density
             val navLoc = IntArray(2).also(navigation::getLocationInWindow)
@@ -172,11 +249,123 @@ internal object HeyboxAdapter : TargetAdapter {
                     current.width >= navigation.width
                 if (!qualifies) break
                 clearChrome(current)
+                cleared += current
                 current = current.parent as? ViewGroup
                 depth++
             }
         }
+        return cleared
     }
+
+    /**
+     * 放开内容在底栏上方的布局预留 (2.1.8, 与掌盟同版同口径,
+     * 落点分析见 QtlAdapter.releaseContentAbove 的注释): 玻璃
+     * 条下方的主题色带不是背景没清干净, 而是 fl_container 被
+     * ABOVE 规则顶在底栏上方、没铺进底栏占位区, 占位区透出
+     * 根布局主题背景; 间隙里的「白色连接」是同一条带露出。
+     *
+     * 旧 extendContentUnderBar 只摘 ABOVE 规则、漏了华为健康
+     * 已验证配方里的另一步——把内容高度设为 MATCH_PARENT:
+     * 只摘规则时, 高度不是满高的内容在 RelativeLayout 里不
+     * 会自己伸到父层底部, 带子因此在 2.1.4–2.1.7 一直都在。
+     * 本版两步齐做, 并按 BetterHeybox 当年可用实现的口径,
+     * 另行按名找到 fl_container 无条件放开 (见
+     * releaseNamedContent), 不再依赖锚点 id 猜对。
+     * 返回 (被放开的视图, 守卫父层→子视图数)。
+     */
+    private fun releaseContentAbove(
+        navigation: ViewGroup,
+    ): Pair<List<View>, Map<ViewGroup, Int>> {
+        val released = ArrayList<View>()
+        val guards = HashMap<ViewGroup, Int>()
+        runCatching {
+            val density = navigation.resources.displayMetrics.density
+            var chainChild: View = navigation
+            var ancestor = navigation.parent as? ViewGroup
+            var depth = 0
+            while (ancestor != null && depth < 4) {
+                if (ancestor is RelativeLayout) {
+                    guards[ancestor] = ancestor.childCount
+                    releaseAboveIn(ancestor, chainChild, navigation, density, released)
+                }
+                chainChild = ancestor
+                ancestor = ancestor.parent as? ViewGroup
+                depth++
+            }
+        }
+        return released to guards
+    }
+
+    private fun releaseAboveIn(
+        layout: RelativeLayout,
+        chainChild: View,
+        source: ViewGroup,
+        density: Float,
+        released: MutableList<View>,
+    ) {
+        val layoutLoc = IntArray(2).also(layout::getLocationInWindow)
+        val layoutBottom = layoutLoc[1] + layout.height
+        val bandSlack = source.height + (64f * density).toInt()
+        for (index in 0 until layout.childCount) {
+            val child = layout.getChildAt(index) ?: continue
+            if (child === chainChild) continue
+            val params = child.layoutParams as? RelativeLayout.LayoutParams ?: continue
+            val anchorId = params.getRule(RelativeLayout.ABOVE)
+            if (anchorId == 0) continue
+            // 内容判别: 自身已布局高度占父高四成以上, 小配件
+            // (提示条/阴影) 天然够不着, 不会被误放。
+            if (layout.height <= 0 || child.height < layout.height * 0.4f) continue
+            val anchor = layout.findViewById<View>(anchorId) ?: continue
+            if (anchor.parent !== layout) continue
+            val qualifies = anchor === chainChild || run {
+                val anchorLoc = IntArray(2).also(anchor::getLocationInWindow)
+                val anchorBottom = anchorLoc[1] + anchor.height
+                layoutBottom - anchorBottom in 0..bandSlack
+            }
+            if (!qualifies) continue
+            params.removeRule(RelativeLayout.ABOVE)
+            params.height = ViewGroup.LayoutParams.MATCH_PARENT
+            child.layoutParams = params
+            released += child
+            XposedBridge.log(
+                "[OfflineGlass][Heybox] released content ABOVE: child=" +
+                    "${entryName(child)} anchor=${entryName(anchor)}",
+            )
+        }
+    }
+
+    /**
+     * 按名放开 fl_container (BetterHeybox 可用实现同口径: 它
+     * 按名找到内容, 把 ABOVE 直接清零, 不猜锚点)。本版再补
+     * 华为配方里的高度一步。返回内容视图供缓存复断言。
+     */
+    private fun releaseNamedContent(navigation: ViewGroup): View? =
+        runCatching {
+            var top: View = navigation
+            var depth = 0
+            while (top.parent is ViewGroup && depth < 6) {
+                top = top.parent as ViewGroup
+                depth++
+            }
+            val content = findByEntryName(top, CONTENT_ID)
+            val parent = content?.parent as? RelativeLayout
+            val params = content?.layoutParams as? RelativeLayout.LayoutParams
+            if (content == null || parent == null || params == null) {
+                null
+            } else {
+                if (params.getRule(RelativeLayout.ABOVE) != 0 ||
+                    params.height != ViewGroup.LayoutParams.MATCH_PARENT
+                ) {
+                    params.removeRule(RelativeLayout.ABOVE)
+                    params.height = ViewGroup.LayoutParams.MATCH_PARENT
+                    content.layoutParams = params
+                    XposedBridge.log(
+                        "[OfflineGlass][Heybox] released fl_container ABOVE by name",
+                    )
+                }
+                content
+            }
+        }.getOrNull()
 
     /** 把独立的加号按钮 vg_mid_tab 移入 rg_main, 顶替 rb_3 占位并继承其布局参数。幂等。 */
     private fun integrateMidTab(navigation: ViewGroup) {
@@ -199,21 +388,13 @@ internal object HeyboxAdapter : TargetAdapter {
         }
     }
 
-    /** 放开 fl_container 的 ABOVE 规则, 让内容铺到屏幕底部、玻璃条直接浮在内容上 (华为健康适配同款处理)。 */
-    private fun extendContentUnderBar(navigation: ViewGroup) {
-        runCatching {
-            val parent = navigation.parent as? ViewGroup ?: return
-            if (parent !is RelativeLayout || navigation.id == View.NO_ID) return
-            for (index in 0 until parent.childCount) {
-                val sibling = parent.getChildAt(index)
-                if (sibling === navigation) continue
-                val params = sibling.layoutParams as? RelativeLayout.LayoutParams ?: continue
-                if (params.rules[RelativeLayout.ABOVE] == navigation.id) {
-                    params.removeRule(RelativeLayout.ABOVE)
-                    sibling.layoutParams = params
-                }
-            }
+    private fun isDescendant(view: View, ancestor: View): Boolean {
+        var current: View? = view
+        while (current != null) {
+            if (current === ancestor) return true
+            current = current.parent as? View
         }
+        return false
     }
 
     private fun clearChrome(view: View) {

@@ -6,9 +6,11 @@ import android.graphics.drawable.ColorDrawable
 import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
+import android.widget.RelativeLayout
 import io.github.offlineglass.config.GlassConfig
 import io.github.offlineglass.hook.GlassHostLayout
 import io.github.offlineglass.hook.NavigationCandidate
+import io.github.offlineglass.hook.compat.XposedBridge
 import io.github.offlineglass.hook.adapters.AdapterBarLayout
 import io.github.offlineglass.hook.adapters.AppNavigationState
 import io.github.offlineglass.hook.adapters.TargetAdapter
@@ -44,6 +46,14 @@ import io.github.offlineglass.targets.TargetSpec
  * 为准 (宿主通用判定按子视图下标打分、跳不过发布槽),
  * 点按加一级「只分发给文字行」的合成触摸快路径; ③独立圆钮
  * 摘掉本地光学三标志, 字段集与 xhs 对齐 (见 barLayout)。
+ *
+ * 2.1.8: 带子第三次定位——它不是任何一层背景, 而是内容被
+ * ABOVE 规则顶在底栏上方、压根没铺进底栏占位区, 占位区透
+ * 出窗口主题背景 (详见 releaseContentAbove); 本版按华为
+ * 健康已验证配方放开该约束 (摘 ABOVE + 高度 MATCH_PARENT)。
+ * 卡顿: suppress 全量解析改每源一次并缓存, 每帧只复清缓存
+ * 视图 (见 ChromeCache); 选中判定改走身份绑定 + 强信号
+ * 早停 (见 QtlNavigationState)。
  */
 internal object QtlAdapter : TargetAdapter {
     override val key = "qtl"
@@ -168,23 +178,95 @@ internal object QtlAdapter : TargetAdapter {
         }
     }
 
-    override fun suppressNativeBottomChrome(navigation: ViewGroup) {
-        stripChrome(navigation)
-        // 宿主会在布局后重绘底色, 下一帧再清一次 (高德适配同款)。
-        navigation.post { runCatching { stripChrome(navigation) } }
+    /**
+     * suppress 的解析结果缓存 (2.1.8)。
+     *
+     * 宿主在每个 pre-draw 帧都会调 suppressNativeBottomChrome,
+     * 旧实现每帧重跑多趟遍历: 源子树按资源名找文字行/加号按钮
+     * 两趟、从窗口根按资源名找源外加号按钮一趟 (全窗 DFS,
+     * getResourceEntryName 逐视图解析)、stripBarContainers 的
+     * getLocationInWindow 一组——是 2.1.6 起切换卡顿的主因。
+     * 现改为每个源只做一次全量解析 (见 stripChrome), 结果连同
+     * 「放开内容 ABOVE」碰过的视图与守卫父层一并缓存; 之后每
+     * 帧只对缓存引用做 O(1) 复清/复断言 (宿主可能在布局后重
+     * 绘底色、重设内容参数, 故保留每帧复清, 但不再遍历树)。
+     * 缓存视图失效 (被替换/脱离/守卫父层子数变化) 或重绑时
+     * 才重新全量解析。
+     */
+    private class ChromeCache(
+        val row: View?,
+        val centerButton: View?,
+        val leakedButton: View?,
+        val containers: List<View>,
+        val released: List<View>,
+        val guards: Map<ViewGroup, Int>,
+    )
+
+    private val chromeCaches = java.util.WeakHashMap<ViewGroup, ChromeCache>()
+
+    override fun suppressNativeBottomChrome(navigation: ViewGroup) =
+        stripChrome(navigation, force = false)
+
+    override fun suppressNativeBottomChromeOnRebind(navigation: ViewGroup) {
+        synchronized(chromeCaches) { chromeCaches.remove(navigation) }
+        stripChrome(navigation, force = true)
     }
 
-    override fun suppressNativeBottomChromeOnRebind(navigation: ViewGroup) =
-        stripChrome(navigation)
-
-    private fun stripChrome(navigation: ViewGroup) {
-        // 清底栏装配自身 (源/文字行/加号按钮) 的底色, 再清原底栏
-        // 容器那一层 (见 stripBarContainers)。内容布局一律不碰。
+    private fun stripChrome(navigation: ViewGroup, force: Boolean) {
+        val cached = synchronized(chromeCaches) { chromeCaches[navigation] }
+        if (!force && cached != null && cacheValid(navigation, cached)) {
+            // 轻量复清: 只碰缓存视图本身, 不遍历任何树。
+            clearChrome(navigation)
+            cached.row?.let { clearChrome(it) }
+            cached.centerButton?.let { clearChrome(it) }
+            cached.containers.forEach { clearChrome(it) }
+            cached.leakedButton?.let {
+                if (it.visibility != View.INVISIBLE) it.visibility = View.INVISIBLE
+            }
+            cached.released.forEach { reassertReleased(it) }
+            return
+        }
+        // 全量解析 (每源一次, 或缓存失效/重绑时)。
         clearChrome(navigation)
-        findByEntryName(navigation, TAB_ROW_ID)?.let { clearChrome(it) }
-        findByEntryName(navigation, CENTER_BUTTON_ID)?.let { clearChrome(it) }
-        hideLeakedCenterButton(navigation)
-        stripBarContainers(navigation)
+        val row = findByEntryName(navigation, TAB_ROW_ID)
+        row?.let { clearChrome(it) }
+        val button = findByEntryName(navigation, CENTER_BUTTON_ID)
+        button?.let { clearChrome(it) }
+        val leaked = hideLeakedCenterButton(navigation)
+        val containers = stripBarContainers(navigation)
+        val (released, guards) = releaseContentAbove(navigation)
+        synchronized(chromeCaches) {
+            chromeCaches[navigation] =
+                ChromeCache(row, button, leaked, containers, released, guards)
+        }
+    }
+
+    private fun cacheValid(navigation: ViewGroup, cache: ChromeCache): Boolean {
+        if (cache.row != null && cache.row !== navigation &&
+            !isDescendant(cache.row, navigation)
+        ) return false
+        if (cache.centerButton != null &&
+            !isDescendant(cache.centerButton, navigation)
+        ) return false
+        if (cache.leakedButton != null &&
+            !cache.leakedButton.isAttachedToWindow
+        ) return false
+        if (cache.containers.any { !isDescendant(navigation, it) }) return false
+        return cache.guards.all { (parent, count) -> parent.childCount == count }
+    }
+
+    /** 内容的 ABOVE 若被宿主重设, 在轻量复清里直接复断言。 */
+    private fun reassertReleased(child: View) {
+        runCatching {
+            val params = child.layoutParams as? RelativeLayout.LayoutParams ?: return
+            if (params.getRule(RelativeLayout.ABOVE) != 0 ||
+                params.height != ViewGroup.LayoutParams.MATCH_PARENT
+            ) {
+                params.removeRule(RelativeLayout.ABOVE)
+                params.height = ViewGroup.LayoutParams.MATCH_PARENT
+                child.layoutParams = params
+            }
+        }
     }
 
     /**
@@ -203,7 +285,8 @@ internal object QtlAdapter : TargetAdapter {
      * 格立即停 (页面级容器高度远超上限, 绝不会被清到), 不改
      * 任何布局参数, 界面完整优先的红线不变。
      */
-    private fun stripBarContainers(navigation: ViewGroup) {
+    private fun stripBarContainers(navigation: ViewGroup): List<View> {
+        val cleared = ArrayList<View>()
         runCatching {
             val row = findByEntryName(navigation, TAB_ROW_ID) ?: navigation
             val density = navigation.resources.displayMetrics.density
@@ -219,9 +302,102 @@ internal object QtlAdapter : TargetAdapter {
                     current.width >= row.width
                 if (!qualifies) break
                 clearChrome(current)
+                cleared += current
                 current = current.parent as? ViewGroup
                 depth++
             }
+        }
+        return cleared
+    }
+
+    /**
+     * 放开内容在底栏上方的布局预留 (2.1.8, 带子问题的确切落点)。
+     *
+     * 与微信/xhs 的完整 diff 结论: 干净适配的内容本来就整屏
+     * 铺底 (叠放式布局), 安装器只清源与直接父层背景即可;
+     * 掌盟的内容是被 RelativeLayout 的 ABOVE 规则顶在底栏
+     * 装配上方的——装配 (源 alpha=0、背景清透) 仍以原高度
+     * 留在原层级占位, 占位区里没有任何内容, 透过去看到的是
+     * 根布局/窗口的主题背景, 那就是玻璃条下方的全宽色带
+     * (浅色白、夜间黑); 间隙里看到的「白色连接」也是同一
+     * 条带在间隙处露出, 并非主条与圆钮之间真有连接物。
+     * 2.1.5–2.1.7 只清各层背景、始终不动这条约束, 所以连扫
+     * 三版带子都在 (2.1.4 曾放开过 ABOVE, 因整页空白回归被
+     * 一并回退——空白的真因是选源命中页面级容器, 与放开
+     * 约束无关; 小黑盒现版的放开只摘规则、漏了高度一步,
+     * 同样没铺下去, 见 heybox 侧同版修正)。
+     *
+     * 做法照仓内已验证的华为健康配方 (其注释对带子的描述与
+     * 本例逐字吻合: 「只把栏做透明, 条带仍占着屏幕空间, 把
+     * 窗口背景画成玻璃条下的一条实带, 内容到不了屏幕底」):
+     * 从源逐层向上, 在每个 RelativeLayout 祖先里, 把以 ABOVE
+     * 规则顶在底栏链 (或底带内锚点) 上方、且自身高度占父高
+     * 四成以上的内容视图摘掉 ABOVE 并把高度设为
+     * MATCH_PARENT, 内容随之铺到屏幕底部、玻璃条浮在内容
+     * 上。高度门槛把提示条/阴影这类同样顶在底栏上方的小
+     * 配件排除在外; 只在全量解析时跑一次, 结果进缓存供每
+     * 帧复断言。返回 (被放开的视图, 守卫父层→子视图数)。
+     */
+    private fun releaseContentAbove(
+        navigation: ViewGroup,
+    ): Pair<List<View>, Map<ViewGroup, Int>> {
+        val released = ArrayList<View>()
+        val guards = HashMap<ViewGroup, Int>()
+        runCatching {
+            val density = navigation.resources.displayMetrics.density
+            var chainChild: View = navigation
+            var ancestor = navigation.parent as? ViewGroup
+            var depth = 0
+            while (ancestor != null && depth < 4) {
+                if (ancestor is RelativeLayout) {
+                    guards[ancestor] = ancestor.childCount
+                    releaseAboveIn(ancestor, chainChild, navigation, density, released)
+                }
+                chainChild = ancestor
+                ancestor = ancestor.parent as? ViewGroup
+                depth++
+            }
+        }
+        return released to guards
+    }
+
+    private fun releaseAboveIn(
+        layout: RelativeLayout,
+        chainChild: View,
+        source: ViewGroup,
+        density: Float,
+        released: MutableList<View>,
+    ) {
+        val layoutLoc = IntArray(2).also(layout::getLocationInWindow)
+        val layoutBottom = layoutLoc[1] + layout.height
+        // 底带容差: 锚点底边落在此范围内视为底栏区锚点 (底栏
+        // 链本身, 或紧贴底栏上方的兄弟层)。
+        val bandSlack = source.height + (64f * density).toInt()
+        for (index in 0 until layout.childCount) {
+            val child = layout.getChildAt(index) ?: continue
+            if (child === chainChild) continue
+            val params = child.layoutParams as? RelativeLayout.LayoutParams ?: continue
+            val anchorId = params.getRule(RelativeLayout.ABOVE)
+            if (anchorId == 0) continue
+            // 内容判别: 自身已布局高度占父高四成以上 (提示条/
+            // 阴影等小配件天然够不着, 不会被误放)。
+            if (layout.height <= 0 || child.height < layout.height * 0.4f) continue
+            val anchor = layout.findViewById<View>(anchorId) ?: continue
+            if (anchor.parent !== layout) continue
+            val qualifies = anchor === chainChild || run {
+                val anchorLoc = IntArray(2).also(anchor::getLocationInWindow)
+                val anchorBottom = anchorLoc[1] + anchor.height
+                layoutBottom - anchorBottom in 0..bandSlack
+            }
+            if (!qualifies) continue
+            params.removeRule(RelativeLayout.ABOVE)
+            params.height = ViewGroup.LayoutParams.MATCH_PARENT
+            child.layoutParams = params
+            released += child
+            XposedBridge.log(
+                "[OfflineGlass][QTL] released content ABOVE: child=" +
+                    "${entryName(child)} anchor=${entryName(anchor)}",
+            )
         }
     }
 
@@ -234,16 +410,21 @@ internal object QtlAdapter : TargetAdapter {
      * 不受 visibility 影响, 点按绑定也照常。在源内时它已随源
      * 一起被隐藏, 不重复处理。
      */
-    private fun hideLeakedCenterButton(navigation: ViewGroup) {
+    private fun hideLeakedCenterButton(navigation: ViewGroup): View? =
         runCatching {
-            val root = navigation.rootView ?: return
-            val button = findByEntryName(root, CENTER_BUTTON_ID) ?: return
-            if (isDescendant(button, navigation)) return
-            if (button.visibility != View.INVISIBLE) {
-                button.visibility = View.INVISIBLE
+            val root = navigation.rootView
+            val button = root?.let { findByEntryName(it, CENTER_BUTTON_ID) }
+            when {
+                button == null -> null
+                isDescendant(button, navigation) -> null
+                else -> {
+                    if (button.visibility != View.INVISIBLE) {
+                        button.visibility = View.INVISIBLE
+                    }
+                    button
+                }
             }
-        }
-    }
+        }.getOrNull()
 
     override fun dispatchNavigationTap(source: ViewGroup?, index: Int, slotCount: Int): Boolean {
         val src = source ?: return false
