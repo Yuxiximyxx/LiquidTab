@@ -67,6 +67,14 @@ import io.github.offlineglass.targets.TargetSpec
  * 背景场景, 使场景底色改走全透明口径, 条身最坏退化为
  * 透明玻璃; 并补快照提交分类与背景状态变化两条定案日志
  * (均见 QtlNavigationState 类注释)。仍只动 qtl。
+ *
+ * 2.1.14: 反编译掌盟 12.10.0 (官方 CDN 同版本包) 定案:
+ * 场景树含独立合成的播放器渲染面, 实时 RenderNode 采样
+ * 先天不可靠; qtl 改默认软件快照背景 (skipLiveBackdrop
+ * 恒 true + 美团同款采样新鲜度语义), 2.1.13 的退化检测
+ * 落闩整套移除。实证/推断分界与落点详见
+ * QtlNavigationState 类注释。本适配 (选源/suppress/点按)
+ * 不变。
  */
 internal object QtlAdapter : TargetAdapter {
     override val key = "qtl"

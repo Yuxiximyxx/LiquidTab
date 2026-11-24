@@ -108,8 +108,58 @@ import kotlin.math.min
  * 「等了好久还是没变」。invalidate + 标脏连败两版,
  * 本版改结构性兜底: 退化坐实且宿主自身兜底未起时
  * 落闩软件快照背景, 条身背景与丢失的 display list
- * 脱钩, 详见 confirmBackdropFallback 的注释; 恢复
- * 泵整套移除。
+ * 脱钩; 恢复泵整套移除。(2.1.13 小乐未回报验否,
+ * 按未闭环处理; 其落闩机制已于 2.1.14 移除, 见下。)
+ *
+ * 2.1.14 (反编译 12.10.0 定案): 从腾讯官方 CDN 取与
+ * 小乐手机同版本的掌盟 12.10.0 APK 反编译 (jadx)。
+ * 【实证】GameHomeActivity (com.tencent.zone.main.zm,
+ * singleTask) 布局 main_zone_activity_game_home:
+ * qt_content (FrameLayout, Activity 根) → drawer_layout
+ * (HackyDrawerLayout) → main_container →
+ * content_and_bottom include activity_game_home_tab;
+ * 条身后方的内容区是 tab_content (FrameLayout,
+ * marginBottom 60dp), 页签 fragment 由 wegamex tabview
+ * 框架装入。宿主把玻璃宿主挂在 android.R.id.content
+ * 下, 本适配供给的背景场景就是 qt_content, 实时场景
+ * 采样的正是 qt_content 的 RenderNode。
+ * 【实证】首页「发现」fragment (fragment_info_home)
+ * 是原生视图树: 标题 tab + ScrollableViewPager, 页内
+ * 为原生 RecyclerView feed, 无 WebView (与真机日志
+ * webView=false 互证)。
+ * 【实证】feed 的视频条目布局 (item_info_moment_
+ * video_222、mutable_video_view 等) 含 com.tencent.
+ * video_center.VideoPlayerView; 其 view_lol_video_
+ * player 内的 video_container 是 SafeVideoFrameLayout
+ * ——播放器 (wrapper_v1/TVK 栈) 在条目绑定/起播时把
+ * 渲染面程序化挂进该容器。渲染面独立合成, 这正是
+ * 宿主 skipLiveBackdrop 接口注释定性的那类页面:
+ * independently composed surfaces which a parent
+ * RenderNode cannot sample reliably。
+ * 【推断】冷启约 8 秒翻转的时点, 与 feed 数据返回、
+ * 首批视频条目绑定挂载渲染面的时点吻合; 渲染面挂载
+ * 后场景节点的 display list 在本机被丢弃且宿主无
+ * 自愈。触发点本身在 LSPosed 日志中不可见, 此点为
+ * 结构推断、未冒充实证 (渲染面是 SurfaceView 还是
+ * TextureView 由播放器 SDK 内部决定, 未逐类核实)。
+ * 结论: qtl 的页面构成与美团外卖合成层页面同类——
+ * 实时 RenderNode 采样先天不可靠, 不该等退化再兜底。
+ * 本版改**默认软件快照背景**: skipLiveBackdrop 恒
+ * true, 宿主从第一帧就走软件快照路径; 采样新鲜度
+ * 按美团已验证的 MeituanMainBackdropState 同款语义
+ * (pending 直到 onSoftwareBackdropRecorded 落账;
+ * needsSample = pending || 场景根 isDirty——后代
+ * invalidate 会把 INVALIDATED 标记逐层传到场景根,
+ * 内容滚动/变化时自然要求新采样, 静止时不重捕)。
+ * 2.1.13 的退化检测/确认落闩整套移除: 它依赖
+ * onHostFrame 观察退化, 而 onHostFrame 由宿主
+ * pre-draw 驱动——静态页帧流枯竭时检测链随帧一起
+ * 饿死 (与 2.1.11 会话 A 同型), 这是它未能闭环的
+ * 结构原因。默认软件路径不依赖任何退化检测:
+ * hasUsableBackdrop 经位图条款成立, 条身背景与
+ * display list 彻底脱钩。代价: 玻璃背景是静态快照
+ * (内容变化时按上款刷新); 视频区域在软件绘制下
+ * 画不出渲染面内容, 但条身永不黑底。
  */
 internal class QtlNavigationState(private val host: GlassHostLayout) : AppNavigationState {
 
@@ -125,17 +175,15 @@ internal class QtlNavigationState(private val host: GlassHostLayout) : AppNaviga
     private var lastBackdropLogKey: String? = null
     /** resolveBackdropScene 的缓存 (校验失效才重找)。 */
     private var cachedScene: View? = null
-    // ---- 2.1.13 结构性兜底状态 (取代 2.1.11/2.1.12 恢复泵) ----
-    /** live && !displayList 退化状态的起始时刻 (0 = 当前未观察到退化)。 */
-    private var backdropDegradedSinceMs = 0L
-    /** 软件快照背景兜底是否已落闩 (落闩后 skipLiveBackdrop 恒 true)。 */
-    private var softwareBackdropFallback = false
-    /** 兜底确认 runnable 是否已投递 (同一退化集只投递一次)。 */
-    private var backdropFallbackConfirmPending = false
-    /** 兜底落闩次数 (供日志对账)。 */
-    private var backdropFallbackEpisodes = 0
-    /** 上次 backdrop 日志打出的 episodes 值 (变化也要打行)。 */
-    private var lastLoggedFallbackEpisodes = -1
+    // ---- 2.1.14 默认软件快照背景的采样状态 ----
+    /**
+     * 是否有一张待采的软件快照 (美团 MeituanMainBackdropState
+     * 同款语义): 初始与切 tab 时为 true, 宿主每次以适配器
+     * 场景为源完成软件捕获后经 onSoftwareBackdropRecorded
+     * 落账为 false; 场景根 isDirty (后代 invalidate 的
+     * INVALIDATED 标记会传到根) 时即使已落账也要求新采样。
+     */
+    private var softwareSamplePending = true
 
     private companion object {
         /** 普查不完整时推迟捕获的间隔。 */
@@ -146,8 +194,6 @@ internal class QtlNavigationState(private val host: GlassHostLayout) : AppNaviga
         const val REJECT_LOG_INTERVAL_MS = 5_000L
         /** 提交分类日志: 同类结果最短间隔 (分类变化立即打)。 */
         const val COMMIT_LOG_INTERVAL_MS = 30_000L
-        /** 退化持续超过此时长才确认兜底 (避开重录瞬间的过渡读数)。 */
-        const val BACKDROP_FALLBACK_CONFIRM_MS = 400L
     }
 
     override fun captureNavigation(source: ViewGroup, target: Bitmap): Boolean {
@@ -162,16 +208,16 @@ internal class QtlNavigationState(private val host: GlassHostLayout) : AppNaviga
     }.getOrDefault("?")
 
     /**
-     * 主动供给背景场景 (2.1.10, 黑底落点)。
+     * 主动供给背景场景 (2.1.10 引入, 2.1.14 沿用为软件
+     * 快照的捕获源)。
      *
-     * 返回宿主父层下「包含导航源」的应用根布局: 默认清扫本
-     * 来就以它为主要兄弟回放, 采样集合不变; 真正的变化在场
-     * 景底色——宿主只对适配器供给的场景调用
-     * backdropSceneBaseColor (接口默认全透明), 默认清扫则走
-     * liveSceneBackgroundColor (夜间落不透明黑)。本适配不覆
-     * 写 backdropSceneBaseColor: 场景内容覆盖不到条身时,
-     * 条身保持透明玻璃, 不再被不透明黑底色填满。找不到合格
-     * 兄弟时返回 null, 退回宿主默认清扫 (行为同旧版)。
+     * 返回宿主父层下「包含导航源」的应用根布局 (反编译
+     * 实证为 GameHomeActivity 的 qt_content 根)。2.1.10
+     * 时它服务于实时场景的底色口径; 2.1.14 起 qtl 默认
+     * 走软件快照背景, 本场景改为宿主 captureBackdrop 的
+     * 捕获源 (needsFreshSoftwareBackdrop 为真时宿主以它
+     * 为源软件绘制), 采样集合与实时场景一致。找不到合
+     * 格兄弟时返回 null, 宿主退回以宿主父层为源捕获。
      */
     override fun resolveBackdropScene(hostView: View): View? {
         val parent = hostView.parent as? ViewGroup ?: return null
@@ -194,140 +240,78 @@ internal class QtlNavigationState(private val host: GlassHostLayout) : AppNaviga
     }
 
     /**
-     * 背景状态变化日志 (2.1.10 定案用)。
+     * 背景状态变化日志 (2.1.10 定案用, 2.1.14 沿用)。
      *
      * onHostFrame 由宿主在每个 pre-draw 帧调用, 这里只做 O(1)
      * 的状态键比较; 状态变化时才打一行并做一次有界 WebView
-     * 探查 (活动子页疑为合成层页面, 该位是关键证据)。真机
-     * 若仍黑: 看黑底出现时段内本行 live/displayList/scene/
-     * webView/fallback/episodes 的取值即可判定背景链断在哪一环。
+     * 探查。2.1.14 起恒为软件快照模式 (mode=software):
+     * live/displayList 应恒为 false (实时场景从未启用),
+     * samplePending 反映待采状态。真机若仍黑: 看黑底时段
+     * 本行与 snapshot commit 行即可分清黑在哪一链。
      */
     override fun onHostFrame(hostView: View) {
         val live = host.liveBackdropActiveForAdapter
         val displayList = host.liveBackdropNodeForAdapter.hasDisplayList()
         val sceneView = resolveBackdropScene(hostView)
         val scene = sceneView != null
-        if (!softwareBackdropFallback) {
-            if (live && !displayList) {
-                // 退化签名 (三段真机会话恒同形态): 记录起点并
-                // 投递兜底确认 (Handler 投递, 不依赖后续帧)。
-                if (backdropDegradedSinceMs == 0L) {
-                    backdropDegradedSinceMs = android.os.SystemClock.uptimeMillis()
-                }
-                scheduleBackdropFallbackConfirm()
-            } else if (displayList) {
-                backdropDegradedSinceMs = 0L
-            }
-        }
-        val key = "$live/$displayList/$scene/$softwareBackdropFallback"
-        if (key == lastBackdropLogKey && backdropFallbackEpisodes == lastLoggedFallbackEpisodes) return
+        val key = "$live/$displayList/$scene/$softwareSamplePending"
+        if (key == lastBackdropLogKey) return
         lastBackdropLogKey = key
-        lastLoggedFallbackEpisodes = backdropFallbackEpisodes
         val webView = cachedScene?.let { containsWebView(it) }
         XposedBridge.log(
-            "[OfflineGlass][QTL] backdrop: live=$live displayList=$displayList " +
-                "scene=$scene webView=$webView fallback=$softwareBackdropFallback " +
-                "episodes=$backdropFallbackEpisodes ctx=${contextLabel()}",
+            "[OfflineGlass][QTL] backdrop: mode=software live=$live " +
+                "displayList=$displayList scene=$scene webView=$webView " +
+                "samplePending=$softwareSamplePending ctx=${contextLabel()}",
         )
     }
 
     /**
-     * 结构性兜底 (2.1.13, 取代 2.1.11/2.1.12 的恢复泵)。
+     * 默认软件快照背景 (2.1.14, 反编译定案, 取代 2.1.13
+     * 的退化落闩与更早的实时场景自愈)。
      *
-     * 2.1.12 的真机日志 (2026-11-25 00:34 导出, 会话
-     * 00:33:54 起, tid 6124) 复盘:
-     * - `00:34:31.268 live=true displayList=false repairs=0`
-     *   翻转 (此前 00:34:27 刚切过 tab);
-     * - `00:34:31.748 ... repairs=1` —— 恢复泵的启动器与
-     *   第 1 轮确实跑了 (+480ms, 与 400ms 驻留吻合);
-     * - 此后直到导出 (00:34:39) 再无任何 backdrop 行:
-     *   没有 displayList=true 恢复行, repairs 也不再有
-     *   被记录的增长; 小乐原话「等了好久还是没变」。
-     * 即 invalidate + 标脏这条恢复路 (一次性版、自驱泵
-     * 版) 已连败两版: 它能启动, 却始终没能让包装节点
-     * 把 display list 录回来。本版不再做第三次同思路
-     * 重试, 改结构性兜底——退化坐实后不再死等实时场景:
-     *
-     * - 确认 (confirmBackdropFallback): 退化签名出现后
-     *   由 Handler 投递的确认 runnable 直接读宿主状态
-     *   (不依赖帧): 包装节点已有 list (自行恢复) 或宿
-     *   主 hasUsableBackdrop 已为真 (宿主自己的软件快照
-     *   路径已被帧流带起来) 时什么都不做; 两者皆无——
-     *   条身正卡在「只剩填充」的黑底状态、且静态页没有
-     *   帧会来救它——才落闩。
-     * - 落闩 (softwareBackdropFallback): skipLiveBackdrop
-     *   恒 true, 宿主 prepareLiveBackdropSceneContent 随
-     *   即放行 (liveBackdropActive=false、return false),
-     *   pre-draw 转入宿主自带的软件快照路径:
-     *   captureBackdrop 以 resolveBackdropScene 为源
-     *   (needsFreshSoftwareBackdrop 同步落闩, 采样集合与
-     *   2.1.10 一致) 把条身后方内容画进 backdrop 位图;
-     *   hasUsableBackdrop 随即经位图条款恒真,
-     *   drawBackdropContent 走位图分支, drawOuterGlass
-     *   的玻璃着色器照常工作 (美团外卖 WebView 页在宿
-     *   主清扫内就是这个落点)。落闩后 invalidate 逼出
-     *   一帧完成首次捕获; 静态页内容不变, 位图即正确
-     *   像素, 不需要后续帧维持。
-     * - 必然性: 黑底的充要条件是 hasUsableBackdrop 为
-     *   假 (条身只剩 surface 填充)。落闩后条身背景的来
-     *   源与那只丢失的 display list 彻底脱钩——位图由
-     *   软件绘制当场生成, 只在尺寸变化时被回收并在同
-     *   一次 captureBackdrop 调用内重捕, 不存在「丢了
-     *   且无人重录」的中间态。代价仅是玻璃退化为静态
-     *   快照背景 (内容滚动时随帧流刷新捕获, 静止时像
-     *   素静止且正确)。
-     * - 解闩: 只在 onNavigationTabSwitched (切 tab =
-     *   新页面场景重建, 实时场景值得再给一次机会) 时
-     *   发生; 若新页面再次退化, 确认流程会重新落闩。
+     * skipLiveBackdrop 恒 true: qtl 的场景树 (qt_content)
+     * 里含独立合成的播放器渲染面 (见类注释的反编译实
+     * 证/推断), 实时 RenderNode 采样先天不可靠——冷启
+     * 约 8 秒场景 display list 丢失且不自愈, 已连败
+     * 2.1.11/2.1.12 两版自愈与 2.1.13 一版事后落闩。
+     * 本版从第一帧就不用实时场景: 宿主
+     * prepareLiveBackdropSceneContent 直接放行,
+     * pre-draw 转入软件快照路径, 条身背景只由
+     * captureBackdrop 的软件位图供给,
+     * hasUsableBackdrop 经位图条款成立, 与 display
+     * list 彻底脱钩, 不存在「退化后再检测/再兜底」的
+     * 时间窗。美团外卖的合成层页面在宿主内走的正是
+     * 这条路径。
      */
-    private fun scheduleBackdropFallbackConfirm() {
-        if (backdropFallbackConfirmPending || softwareBackdropFallback) return
-        backdropFallbackConfirmPending = true
-        host.postDelayed({
-            backdropFallbackConfirmPending = false
-            confirmBackdropFallback()
-        }, BACKDROP_FALLBACK_CONFIRM_MS)
+    override fun skipLiveBackdrop(selectedIndex: Int): Boolean = true
+
+    /**
+     * 软件快照的新鲜度请求 (美团 MeituanMainBackdropState
+     * 同款语义): 有待采快照 (初始/切 tab 后未落账) 时恒
+     * 请求; 已落账后只在场景根 isDirty 时请求——内容滚动
+     * 或变化会让后代的 invalidate 把 INVALIDATED 标记
+     * 逐层传到场景根, 静止页面则不再重捕, 避免每帧全屏
+     * 软件绘制。宿主在 needsFreshSoftwareBackdrop 为真
+     * 时以 resolveBackdropScene 为源捕获 (采样集合与
+     * 旧实时场景一致)。
+     */
+    override fun needsFreshSoftwareBackdrop(): Boolean {
+        if (softwareSamplePending) return true
+        val scene = cachedScene ?: return false
+        return scene.isAttachedToWindow && scene.isDirty
     }
 
-    private fun confirmBackdropFallback() {
-        if (softwareBackdropFallback) return
-        if (host.liveBackdropNodeForAdapter.hasDisplayList()) {
-            // 确认前已自行恢复 (重录完成), 不落闩。
-            backdropDegradedSinceMs = 0L
-            return
-        }
-        if (host.hasUsableBackdrop()) {
-            // 宿主自己的软件快照兜底已被帧流带起来 (位图在
-            // 屏), 条身不在黑底状态, 无需适配器再落闩。
-            backdropDegradedSinceMs = 0L
-            return
-        }
-        // 条身卡在只剩填充的黑底状态, 且静态页没有帧会来
-        // 救它: 落闩结构性兜底, 并逼出一帧完成首次快照捕获。
-        softwareBackdropFallback = true
-        backdropFallbackEpisodes++
-        XposedBridge.log(
-            "[OfflineGlass][QTL] backdrop fallback: live scene lost and " +
-                "backdrop unusable, software snapshot latched " +
-                "episodes=$backdropFallbackEpisodes ctx=${contextLabel()}",
-        )
-        host.invalidate()
+    /** 宿主完成一次软件捕获后落账: 本页快照已是最新。 */
+    override fun onSoftwareBackdropRecorded() {
+        softwareSamplePending = false
     }
 
-    /** 落闩期间恒跳过实时场景: 宿主转入软件快照背景路径。 */
-    override fun skipLiveBackdrop(selectedIndex: Int): Boolean = softwareBackdropFallback
-
-    /** 落闩期间软件快照以适配器供给的场景为源, 与实时场景同一采样集合。 */
-    override fun needsFreshSoftwareBackdrop(): Boolean = softwareBackdropFallback
-
-    /** 切 tab 是新页面场景重建: 解闩, 让实时场景重新试一次。 */
+    /** 切 tab = 新页面: 要求为新页重新采一张快照。 */
     override fun onNavigationTabSwitched(index: Int, slotCount: Int, now: Long) {
-        if (!softwareBackdropFallback) return
-        softwareBackdropFallback = false
-        backdropDegradedSinceMs = 0L
+        softwareSamplePending = true
         XposedBridge.log(
-            "[OfflineGlass][QTL] backdrop fallback: unlatched on tab switch " +
-                "index=$index episodes=$backdropFallbackEpisodes ctx=${contextLabel()}",
+            "[OfflineGlass][QTL] backdrop: mode=software sample requested " +
+                "on tab switch index=$index ctx=${contextLabel()}",
         )
     }
 

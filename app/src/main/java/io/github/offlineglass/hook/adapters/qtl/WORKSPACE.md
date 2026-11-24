@@ -227,3 +227,43 @@
   backdrop 日志改 fallback/episodes 两位，落闩/
   解闩各有专行。其余链路一律未动。
 - 状态：2.1.13 已发布待验，以上均为代码层修复，未经真机验证。
+- 2.1.14：小乐点名「直接在豌豆荚或者 APKPure 获取」
+  掌盟安装包——从腾讯官方 CDN 取到与小乐手机同版
+  本的 12.10.0 APK（包名/版本核验一致）反编译
+  （jadx）定案。【实证】GameHomeActivity
+  （com.tencent.zone.main.zm，singleTask）布局
+  main_zone_activity_game_home：qt_content
+  （Activity 根 FrameLayout）→ HackyDrawerLayout
+  → main_container → content_and_bottom include
+  activity_game_home_tab；内容区为 tab_content
+  （marginBottom 60dp），页签 fragment 由 wegamex
+  tabview 装入；宿主把玻璃宿主挂在
+  android.R.id.content 下，qtl 供给的背景场景即
+  qt_content，实时采样的是它的 RenderNode。
+  【实证】首页「发现」fragment_info_home 为原生
+  视图树（标题 tab + ScrollableViewPager + 原生
+  RecyclerView feed，无 WebView，与真机日志
+  webView=false 互证）。【实证】feed 视频条目
+  （item_info_moment_video_222、mutable_video_view
+  等）含 VideoPlayerView，其 video_container 是
+  SafeVideoFrameLayout，播放器（wrapper_v1/TVK）
+  在条目绑定/起播时把独立合成的渲染面程序化挂入
+  ——正是宿主 skipLiveBackdrop 注释定性的
+  independently composed surfaces。【推断】冷启
+  约 8 秒翻转时点与 feed 数据返回、首批视频条目
+  挂载渲染面吻合，渲染面挂载后场景 display list
+  在本机被丢弃且不自愈；触发点在日志中不可见、
+  渲染面具体类型（Surface/Texture）未逐类核实，
+  此点为结构推断。落点：qtl 改默认软件快照背景
+  ——skipLiveBackdrop 恒 true，宿主从第一帧走
+  软件快照路径；采样新鲜度按美团
+  MeituanMainBackdropState 同款语义（pending 至
+  onSoftwareBackdropRecorded 落账，needsSample =
+  pending || 场景根 isDirty）。2.1.13 的退化检
+  测/确认落闩整套移除（其依赖 onHostFrame 观察
+  退化，静态页帧流枯竭时检测链随帧饿死，与
+  2.1.11 会话 A 同型，是未能闭环的结构原因；
+  2.1.13 小乐未回报验否，按未闭环处理）。已验
+  好部分（点击对位、选中映射、内容铺底、商城槽
+  位）未动；heybox 未碰。
+- 状态：2.1.14 已发布待验，以上均为代码层修复，未经真机验证。

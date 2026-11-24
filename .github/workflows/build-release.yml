@@ -54,9 +54,9 @@ jobs:
           "$SDK/zipalign" -p -f 4 "$SRC" dist/aligned.apk
           "$SDK/apksigner" sign --ks "$RUNNER_TEMP/liquidtab-release.keystore" \
             --ks-pass env:STORE_PASSWORD --ks-key-alias "$KEY_ALIAS" --key-pass env:KEY_PASSWORD \
-            --out dist/LiquidTab-2.1.13-release.apk dist/aligned.apk
+            --out dist/LiquidTab-2.1.14-release.apk dist/aligned.apk
           rm dist/aligned.apk
-          "$SDK/apksigner" verify --print-certs dist/LiquidTab-2.1.13-release.apk
+          "$SDK/apksigner" verify --print-certs dist/LiquidTab-2.1.14-release.apk
           ls -lh dist
 
       - name: Upload artifact
@@ -69,74 +69,69 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v2.1.13
-          name: LiquidTab 2.1.13（fork：掌盟黑底三轮定案——实时场景恢复改结构性兜底）
+          tag_name: v2.1.14
+          name: LiquidTab 2.1.14（fork：反编译掌盟定案——默认软件快照背景）
           body: |
-            ## LiquidTab 2.1.13（Yuxiximyxx fork）
+            ## LiquidTab 2.1.14（Yuxiximyxx fork）
 
-            versionName 2.1.13 / versionCode 236。基线仍为 upstream
-            tag v2.1.2 + fork 适配，证书与 2.0.1–2.1.12 相同，
-            可直接覆盖升级。本版**只动掌盟（qtl）**，按 2.1.12
-            的真机日志定案改结构性兜底；小黑盒本版不碰。
-            **均为代码层修复，未经真机验证**：
+            versionName 2.1.14 / versionCode 237。基线仍为 upstream
+            tag v2.1.2 + fork 适配，证书与 2.0.1–2.1.13 相同，
+            可直接覆盖升级。本版**只动掌盟（qtl）**；小黑盒
+            本版不碰。**均为代码层修复，未经真机验证**：
 
-            ### 日志定案（2.1.12 会话，00:33:54 起）
+            ### 反编译定案（掌盟 12.10.0，腾讯官方 CDN 同版本包）
 
-            - `snapshot commit` 恒 `committed-leaf`
-              （一次 `rejected-opaque` 是通用兜底被拒、逐叶图
-              保留），artwork 链健康；`scene=true`、
-              `webView=false` 与前两段会话一致。
-            - `00:34:31.268 live=true displayList=false repairs=0`
-              翻转；`00:34:31.748 repairs=1`——恢复泵的启动器
-              与第 1 轮确实跑了（+480ms，与 400ms 驻留吻合）。
-            - 此后直到导出（00:34:39）再无任何 backdrop 行：
-              没有 `displayList=true` 恢复行，repairs 也不再
-              有被记录的增长；小乐原话「等了好久还是没变」。
-            - 结论：invalidate + 标脏这条恢复路（2.1.11 一次
-              性版、2.1.12 自驱泵版）连败两版——能启动，却始
-              终没能让包装节点把 display list 录回来。本版不
-              再做第三次同思路重试。
+            - 【实证】GameHomeActivity（singleTask）布局：
+              qt_content（Activity 根）→ HackyDrawerLayout →
+              main_container → 底栏装配；条身后方内容区是
+              tab_content，页签 fragment 由 wegamex tabview
+              装入。模块供给的背景场景就是 qt_content，实时
+              场景采样的是它的 RenderNode。
+            - 【实证】首页「发现」是原生视图树（标题 tab +
+              ViewPager + 原生 RecyclerView feed，无 WebView，
+              与真机日志 webView=false 互证）。
+            - 【实证】feed 的视频条目含 VideoPlayerView，
+              其 video_container（SafeVideoFrameLayout）由
+              播放器在条目绑定/起播时程序化挂入**独立合成的
+              渲染面**——正是宿主接口注释定性的、父级
+              RenderNode 无法可靠采样的那类页面构成。
+            - 【推断】冷启约 8 秒 display list 丢失的时点，
+              与 feed 数据返回、首批视频条目挂载渲染面吻合；
+              触发点本身在日志中不可见，此点为结构推断。
 
-            ### 本版修法（只动 qtl，换结构性兜底）
+            ### 本版修法（只动 qtl）
 
-            退化坐实后不再死等实时场景，改走宿主自带的软件
-            快照背景（美团外卖 WebView 页在宿主清扫内的同款
-            落点）：
+            结论：这类页面不该用实时场景、更不该等它退化
+            再兜底（2.1.11/2.1.12 自愈、2.1.13 事后落闩均
+            未闭环；落闩依赖的帧驱动检测在静态页会随帧流
+            枯竭而饿死）。本版起 qtl **默认软件快照背景**：
 
-            - 退化签名（live=true 而 displayList=false）出现
-              后 400ms，由 Handler 投递的确认直接读宿主状态
-              （不依赖帧）：包装节点已自行恢复、或宿主的软件
-              快照已被帧流带起来时，什么都不做；两者皆无——
-              条身正卡在只剩填充的黑底状态且没有帧会来救它
-              ——才落闩。
-            - 落闩后 skipLiveBackdrop 恒真：宿主放行实时场
-              景，pre-draw 转入软件快照路径，以适配器供给的
-              场景为源把条身后方内容画进 backdrop 位图；
-              hasUsableBackdrop 经位图条款恒真，玻璃着色器
-              照常工作。落闩后逼出一帧完成首次捕获；静态页
-              内容不变，位图即正确像素，不需要后续帧维持。
-            - 必然性：黑底的充要条件是 hasUsableBackdrop 为
-              假（只剩填充）。落闩后条身背景与那只丢失的
-              display list 彻底脱钩——位图由软件绘制当场生
-              成，不存在「丢了且无人重录」的中间态。代价仅
-              是玻璃退化为静态快照背景（滚动时随帧流刷新）。
-            - 切 tab（新页面场景重建）时解闩，实时场景重新
-              试一次；再退化会重新落闩。恢复泵整套移除。
-            - backdrop 日志新增 fallback/episodes 两位，落
-              闩与解闩各有专行（`backdrop fallback: ...`）。
+            - skipLiveBackdrop 恒 true：宿主从第一帧就放行
+              实时场景，pre-draw 走软件快照路径，以 qt_content
+              为源把条身后方内容画进 backdrop 位图；
+              hasUsableBackdrop 经位图条款成立，条身背景与
+              display list 彻底脱钩，不存在退化时间窗。
+            - 采样新鲜度按美团已验证的同款语义：有待采快照
+              （初始/切 tab 后）时请求新采样，落账后只在场
+              景内容变化（场景根 isDirty）时重采，静止页面
+              不做无谓的全屏软件绘制。
+            - 2.1.13 的退化检测/确认落闩整套移除；backdrop
+              日志改打 mode=software 与 samplePending。
+            - 代价：玻璃背景是静态快照（内容变化时刷新）；
+              视频区域在软件绘制下画不出渲染面内容，但条
+              身永不黑底。已验好的点击对位、选中映射、内
+              容铺底、商城槽位一律未动。
 
             ### 复验要点
 
-            - 掌盟强停重开：停在首页与「发现 → 活动」子页
-              各看底栏——黑底出现后**原地停留不操作**，预期
-              约 1 秒内条身自行变为有内容的玻璃（落闩后是
-              静态快照背景，质感略降于实时玻璃，但绝不再是
-              不透明黑）；切 tab 后实时玻璃应恢复。
+            - 掌盟强停重开：首页与「发现 → 活动」子页各停
+              留观察（包括停住不动等十几秒）——底栏应始终
+              是有内容的玻璃，不再出现整条黑底；切 tab 流
+              畅、高亮对位、药丸颜色一致不回退。
             - 若仍黑：请再导出一次 LSPosed 日志发回，看
-              [OfflineGlass][QTL] 有没有 `backdrop fallback:
-              ... latched` 行——有落闩行而条仍黑，断点在软
-              件快照路径本身；没有落闩行，看 backdrop 行的
-              fallback/episodes 取值继续定案。
+              [OfflineGlass][QTL] backdrop 行的
+              mode/samplePending 与 snapshot commit 行继
+              续定案。
             - 小黑盒本版未动，无需复验。
 
             ### 注意
