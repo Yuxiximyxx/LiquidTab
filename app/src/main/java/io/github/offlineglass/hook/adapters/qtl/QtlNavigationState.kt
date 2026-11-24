@@ -99,7 +99,17 @@ import kotlin.math.min
  * 2.1.12 (2.1.11 真机日志复盘): 一次性修复被证不闭环——
  * 会话 A 修复因帧泵枯竭根本没触发 (repairs 恒 0), 会
  * 话 B 触发一次 (repairs=1) 后无恢复行。自愈改为自驱
- * 恢复泵, 详见 armBackdropRepairPump 的注释。
+ * 恢复泵 (该泵已于 2.1.13 整套移除, 见下一段)。
+ *
+ * 2.1.13 (2.1.12 真机日志复盘): 恢复泵也没能闭环——
+ * 新会话 (00:33:54 起) 00:34:31 翻转、+480ms
+ * repairs=1 (泵启动且跑了第 1 轮), 此后直到导出再
+ * 无恢复行、repairs 不再有被记录的增长, 小乐原话
+ * 「等了好久还是没变」。invalidate + 标脏连败两版,
+ * 本版改结构性兜底: 退化坐实且宿主自身兜底未起时
+ * 落闩软件快照背景, 条身背景与丢失的 display list
+ * 脱钩, 详见 confirmBackdropFallback 的注释; 恢复
+ * 泵整套移除。
  */
 internal class QtlNavigationState(private val host: GlassHostLayout) : AppNavigationState {
 
@@ -115,20 +125,17 @@ internal class QtlNavigationState(private val host: GlassHostLayout) : AppNaviga
     private var lastBackdropLogKey: String? = null
     /** resolveBackdropScene 的缓存 (校验失效才重找)。 */
     private var cachedScene: View? = null
-    // ---- 2.1.11/2.1.12 实时场景自愈状态 ----
-    /** live && !displayList 退化状态的起始时刻 (0 = 当前健康)。 */
+    // ---- 2.1.13 结构性兜底状态 (取代 2.1.11/2.1.12 恢复泵) ----
+    /** live && !displayList 退化状态的起始时刻 (0 = 当前未观察到退化)。 */
     private var backdropDegradedSinceMs = 0L
-    private var backdropRepairCount = 0
-    /** 恢复泵代次 (arm/停泵时递增, 使已投递的旧 runnable 失效)。 */
-    private var backdropRepairEpisode = 0
-    /** 恢复泵是否已 arm 或正在跑 (同一退化集只 arm 一次)。 */
-    private var backdropRepairLoopActive = false
-    /** 本集恢复泵已跑的轮数。 */
-    private var backdropRepairIterations = 0
-    /** 本集预算已耗尽: 状态恢复前不再重新 arm (防不可恢复时反复打泵)。 */
-    private var backdropRepairExhausted = false
-    /** 上次 backdrop 日志打出的 repairs 值 (变化也要打行)。 */
-    private var lastLoggedRepairCount = -1
+    /** 软件快照背景兜底是否已落闩 (落闩后 skipLiveBackdrop 恒 true)。 */
+    private var softwareBackdropFallback = false
+    /** 兜底确认 runnable 是否已投递 (同一退化集只投递一次)。 */
+    private var backdropFallbackConfirmPending = false
+    /** 兜底落闩次数 (供日志对账)。 */
+    private var backdropFallbackEpisodes = 0
+    /** 上次 backdrop 日志打出的 episodes 值 (变化也要打行)。 */
+    private var lastLoggedFallbackEpisodes = -1
 
     private companion object {
         /** 普查不完整时推迟捕获的间隔。 */
@@ -139,14 +146,8 @@ internal class QtlNavigationState(private val host: GlassHostLayout) : AppNaviga
         const val REJECT_LOG_INTERVAL_MS = 5_000L
         /** 提交分类日志: 同类结果最短间隔 (分类变化立即打)。 */
         const val COMMIT_LOG_INTERVAL_MS = 30_000L
-        /** 场景退化持续超过此时长才 arm 恢复泵 (避开重录瞬间的过渡读数)。 */
-        const val BACKDROP_REPAIR_DWELL_MS = 400L
-        /** 恢复泵每轮间隔: 一轮遍历重录场景自身 list, 下一轮清扫才命中。 */
-        const val BACKDROP_REPAIR_INTERVAL_MS = 300L
-        /** 恢复泵单集预算 (轮): 12 轮约 3.6 秒, 足够两轮遍历闭环。 */
-        const val BACKDROP_REPAIR_MAX_ITERATIONS = 12
-        /** 每轮标脏延迟: 让宿主的刷新 runnable 在本轮遍历后落点。 */
-        const val BACKDROP_REPAIR_DELAY_MS = 40L
+        /** 退化持续超过此时长才确认兜底 (避开重录瞬间的过渡读数)。 */
+        const val BACKDROP_FALLBACK_CONFIRM_MS = 400L
     }
 
     override fun captureNavigation(source: ViewGroup, target: Bitmap): Boolean {
@@ -199,126 +200,137 @@ internal class QtlNavigationState(private val host: GlassHostLayout) : AppNaviga
      * 的状态键比较; 状态变化时才打一行并做一次有界 WebView
      * 探查 (活动子页疑为合成层页面, 该位是关键证据)。真机
      * 若仍黑: 看黑底出现时段内本行 live/displayList/scene/
-     * webView 的取值即可判定背景链断在哪一环。
+     * webView/fallback/episodes 的取值即可判定背景链断在哪一环。
      */
     override fun onHostFrame(hostView: View) {
         val live = host.liveBackdropActiveForAdapter
         val displayList = host.liveBackdropNodeForAdapter.hasDisplayList()
         val sceneView = resolveBackdropScene(hostView)
         val scene = sceneView != null
-        if (!displayList) {
-            // 退化 (含 live 被清扫瞬时清掉的中间态): arm 恢复泵。
-            // 正常冷启的短暂无 list 由启动器到期自查兜住, 不产
-            // 生实际泵轮 (见 runBackdropRepairPump 的自查)。
-            armBackdropRepairPump()
-        } else {
-            // 已恢复: 停泵、清耗尽闩, 本集结束。
-            if (backdropRepairLoopActive) stopBackdropRepairPump()
-            backdropRepairExhausted = false
+        if (!softwareBackdropFallback) {
+            if (live && !displayList) {
+                // 退化签名 (三段真机会话恒同形态): 记录起点并
+                // 投递兜底确认 (Handler 投递, 不依赖后续帧)。
+                if (backdropDegradedSinceMs == 0L) {
+                    backdropDegradedSinceMs = android.os.SystemClock.uptimeMillis()
+                }
+                scheduleBackdropFallbackConfirm()
+            } else if (displayList) {
+                backdropDegradedSinceMs = 0L
+            }
         }
-        val key = "$live/$displayList/$scene"
-        if (key == lastBackdropLogKey && backdropRepairCount == lastLoggedRepairCount) return
+        val key = "$live/$displayList/$scene/$softwareBackdropFallback"
+        if (key == lastBackdropLogKey && backdropFallbackEpisodes == lastLoggedFallbackEpisodes) return
         lastBackdropLogKey = key
-        lastLoggedRepairCount = backdropRepairCount
+        lastLoggedFallbackEpisodes = backdropFallbackEpisodes
         val webView = cachedScene?.let { containsWebView(it) }
         XposedBridge.log(
             "[OfflineGlass][QTL] backdrop: live=$live displayList=$displayList " +
-                "scene=$scene webView=$webView repairs=$backdropRepairCount " +
-                "ctx=${contextLabel()}",
+                "scene=$scene webView=$webView fallback=$softwareBackdropFallback " +
+                "episodes=$backdropFallbackEpisodes ctx=${contextLabel()}",
         )
     }
 
     /**
-     * 实时场景自愈 (2.1.11 一次性修复, 2.1.12 换恢复泵)。
+     * 结构性兜底 (2.1.13, 取代 2.1.11/2.1.12 的恢复泵)。
      *
-     * 2.1.11 的真机日志 (2026-11-25 00:01 导出, 两段会话)
-     * 证明一次性修复不闭环:
-     * - 会话 A (23:57:01 起): 23:57:05.458 翻为
-     *   live=true/displayList=false 后, 直到进程重启
-     *   (23:59:07) 再无任何 backdrop 行、repairs 恒 0——
-     *   修复的触发点 onHostFrame 只在 pre-draw 跑, 静态
-     *   页不再出帧, 驻留判定永远等不到下一帧, 修复根本
-     *   没触发; 小乐 23:59:00 的黑底截图正落在此区间。
-     * - 会话 B (23:59:07 起): 23:59:43.775 翻转,
-     *   23:59:44.190 repairs=1 (一次性修复触发过一次),
-     *   此后直到导出 (00:01:42) 无 displayList=true 恢
-     *   复行、repairs 不再涨——单次 invalidate+标脏只保
-     *   证一帧遍历, 而那一帧的 pre-draw 清扫跑在场景视
-     *   图于 draw 阶段重录自身 list 之前, 仍然扑空; 之
-     *   后无帧, 机制既不能确认恢复也不能重试。
-     * 两段 snapshot commit 恒 committed-leaf, artwork
-     * 链健康 (会话 B 一次 rejected-opaque 是通用兜底被
-     * 拒、逐叶图保留), 黑底与快照无关。
+     * 2.1.12 的真机日志 (2026-11-25 00:34 导出, 会话
+     * 00:33:54 起, tid 6124) 复盘:
+     * - `00:34:31.268 live=true displayList=false repairs=0`
+     *   翻转 (此前 00:34:27 刚切过 tab);
+     * - `00:34:31.748 ... repairs=1` —— 恢复泵的启动器与
+     *   第 1 轮确实跑了 (+480ms, 与 400ms 驻留吻合);
+     * - 此后直到导出 (00:34:39) 再无任何 backdrop 行:
+     *   没有 displayList=true 恢复行, repairs 也不再有
+     *   被记录的增长; 小乐原话「等了好久还是没变」。
+     * 即 invalidate + 标脏这条恢复路 (一次性版、自驱泵
+     * 版) 已连败两版: 它能启动, 却始终没能让包装节点
+     * 把 display list 录回来。本版不再做第三次同思路
+     * 重试, 改结构性兜底——退化坐实后不再死等实时场景:
      *
-     * 2.1.12 改为自驱恢复泵, 不依赖环境帧:
-     * - onHostFrame 首次观察到退化即 arm: 投递一个
-     *   [BACKDROP_REPAIR_DWELL_MS] 的启动 runnable (主
-     *   线程 Handler, 与帧无关), 到期直接读宿主状态确
-     *   认仍退化才开泵——会话 A 那种「观察到翻转后帧
-     *   泵枯竭」的形态也能启动。
-     * - 泵每 [BACKDROP_REPAIR_INTERVAL_MS] 一轮: 场景
-     *   视图 invalidate + adapterScheduleBackdropRefresh
-     *   标脏签名并逼一帧遍历。第 N 轮遍历在 draw 阶段
-     *   重录场景自身 list, 第 N+1 轮的 pre-draw 清扫即
-     *   可命中并重录包装节点 (签名已标脏, sceneChanged
-     *   成立), 两轮遍历由泵自己保证, 不等用户交互。
-     * - 每轮 repairs++ 并自查 hasDisplayList: 恢复即
-     *   停泵 (onHostFrame 也会打出带 repairs 的
-     *   displayList=true 恢复行); 单集预算
-     *   [BACKDROP_REPAIR_MAX_ITERATIONS] 轮, 超预算停
-     *   泵、本集不再重启 (状态恢复后才可重新 arm),
-     *   避免场景真不可恢复时无限打泵。
+     * - 确认 (confirmBackdropFallback): 退化签名出现后
+     *   由 Handler 投递的确认 runnable 直接读宿主状态
+     *   (不依赖帧): 包装节点已有 list (自行恢复) 或宿
+     *   主 hasUsableBackdrop 已为真 (宿主自己的软件快照
+     *   路径已被帧流带起来) 时什么都不做; 两者皆无——
+     *   条身正卡在「只剩填充」的黑底状态、且静态页没有
+     *   帧会来救它——才落闩。
+     * - 落闩 (softwareBackdropFallback): skipLiveBackdrop
+     *   恒 true, 宿主 prepareLiveBackdropSceneContent 随
+     *   即放行 (liveBackdropActive=false、return false),
+     *   pre-draw 转入宿主自带的软件快照路径:
+     *   captureBackdrop 以 resolveBackdropScene 为源
+     *   (needsFreshSoftwareBackdrop 同步落闩, 采样集合与
+     *   2.1.10 一致) 把条身后方内容画进 backdrop 位图;
+     *   hasUsableBackdrop 随即经位图条款恒真,
+     *   drawBackdropContent 走位图分支, drawOuterGlass
+     *   的玻璃着色器照常工作 (美团外卖 WebView 页在宿
+     *   主清扫内就是这个落点)。落闩后 invalidate 逼出
+     *   一帧完成首次捕获; 静态页内容不变, 位图即正确
+     *   像素, 不需要后续帧维持。
+     * - 必然性: 黑底的充要条件是 hasUsableBackdrop 为
+     *   假 (条身只剩 surface 填充)。落闩后条身背景的来
+     *   源与那只丢失的 display list 彻底脱钩——位图由
+     *   软件绘制当场生成, 只在尺寸变化时被回收并在同
+     *   一次 captureBackdrop 调用内重捕, 不存在「丢了
+     *   且无人重录」的中间态。代价仅是玻璃退化为静态
+     *   快照背景 (内容滚动时随帧流刷新捕获, 静止时像
+     *   素静止且正确)。
+     * - 解闩: 只在 onNavigationTabSwitched (切 tab =
+     *   新页面场景重建, 实时场景值得再给一次机会) 时
+     *   发生; 若新页面再次退化, 确认流程会重新落闩。
      */
-    private fun armBackdropRepairPump() {
-        if (backdropDegradedSinceMs == 0L) {
-            backdropDegradedSinceMs = android.os.SystemClock.uptimeMillis()
-        }
-        if (backdropRepairLoopActive || backdropRepairExhausted) return
-        backdropRepairLoopActive = true
-        backdropRepairIterations = 0
-        val episode = ++backdropRepairEpisode
+    private fun scheduleBackdropFallbackConfirm() {
+        if (backdropFallbackConfirmPending || softwareBackdropFallback) return
+        backdropFallbackConfirmPending = true
         host.postDelayed({
-            if (episode != backdropRepairEpisode || !backdropRepairLoopActive) return@postDelayed
-            runBackdropRepairPump(episode)
-        }, BACKDROP_REPAIR_DWELL_MS)
+            backdropFallbackConfirmPending = false
+            confirmBackdropFallback()
+        }, BACKDROP_FALLBACK_CONFIRM_MS)
     }
 
-    private fun stopBackdropRepairPump() {
-        backdropRepairLoopActive = false
-        backdropDegradedSinceMs = 0L
-        backdropRepairEpisode++
-    }
-
-    private fun runBackdropRepairPump(episode: Int) {
-        if (episode != backdropRepairEpisode || !backdropRepairLoopActive) return
-        if (!host.isAttachedToWindow) {
-            stopBackdropRepairPump()
-            return
-        }
-        // 直接读宿主状态自查: 只认包装节点 list——恢复即停,
-        // 不等下一帧的 onHostFrame。不能用 live 作停泵条件:
-        // 恢复途中清扫的空节点分支会把 live 瞬时置 false,
-        // 那是恢复序列的中间态, 误停会把泵掐死在半路。
+    private fun confirmBackdropFallback() {
+        if (softwareBackdropFallback) return
         if (host.liveBackdropNodeForAdapter.hasDisplayList()) {
-            stopBackdropRepairPump()
+            // 确认前已自行恢复 (重录完成), 不落闩。
+            backdropDegradedSinceMs = 0L
             return
         }
-        if (backdropRepairIterations >= BACKDROP_REPAIR_MAX_ITERATIONS) {
-            // 预算耗尽仍未恢复: 停泵并落耗尽闩, 本集不再重启
-            // (日志里 repairs 停涨 + 无恢复行即此形态, 断点另有其环)。
-            backdropRepairExhausted = true
-            stopBackdropRepairPump()
+        if (host.hasUsableBackdrop()) {
+            // 宿主自己的软件快照兜底已被帧流带起来 (位图在
+            // 屏), 条身不在黑底状态, 无需适配器再落闩。
+            backdropDegradedSinceMs = 0L
             return
         }
-        backdropRepairIterations++
-        backdropRepairCount++
-        resolveBackdropScene(host)?.invalidate()
-        host.adapterScheduleBackdropRefresh(BACKDROP_REPAIR_DELAY_MS)
-        host.postDelayed({
-            if (episode != backdropRepairEpisode) return@postDelayed
-            runBackdropRepairPump(episode)
-        }, BACKDROP_REPAIR_INTERVAL_MS)
+        // 条身卡在只剩填充的黑底状态, 且静态页没有帧会来
+        // 救它: 落闩结构性兜底, 并逼出一帧完成首次快照捕获。
+        softwareBackdropFallback = true
+        backdropFallbackEpisodes++
+        XposedBridge.log(
+            "[OfflineGlass][QTL] backdrop fallback: live scene lost and " +
+                "backdrop unusable, software snapshot latched " +
+                "episodes=$backdropFallbackEpisodes ctx=${contextLabel()}",
+        )
+        host.invalidate()
     }
+
+    /** 落闩期间恒跳过实时场景: 宿主转入软件快照背景路径。 */
+    override fun skipLiveBackdrop(selectedIndex: Int): Boolean = softwareBackdropFallback
+
+    /** 落闩期间软件快照以适配器供给的场景为源, 与实时场景同一采样集合。 */
+    override fun needsFreshSoftwareBackdrop(): Boolean = softwareBackdropFallback
+
+    /** 切 tab 是新页面场景重建: 解闩, 让实时场景重新试一次。 */
+    override fun onNavigationTabSwitched(index: Int, slotCount: Int, now: Long) {
+        if (!softwareBackdropFallback) return
+        softwareBackdropFallback = false
+        backdropDegradedSinceMs = 0L
+        XposedBridge.log(
+            "[OfflineGlass][QTL] backdrop fallback: unlatched on tab switch " +
+                "index=$index episodes=$backdropFallbackEpisodes ctx=${contextLabel()}",
+        )
+    }
+
 
     /** 有界探查子树里是否有可见 WebView (仅状态变化时跑, 上限 800 个视图)。 */
     private fun containsWebView(root: View): Boolean {

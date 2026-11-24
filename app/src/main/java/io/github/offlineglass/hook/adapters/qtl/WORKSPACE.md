@@ -193,3 +193,37 @@
   启；backdrop 日志改为 repairs 变化也打行，使泵的
   工作过程在日志里可见。其余链路一律未动。
 - 状态：2.1.12 已发布待验，以上均为代码层修复，未经真机验证。
+- 2.1.13：小乐真机验 2.1.12 回报「等了好久还是没变」
+  +新 LSPosed 日志（00:34:39 导出）。日志复盘（会
+  话 00:33:54 起，tid 6124）：commit 恒
+  committed-leaf、scene=true、webView=false；
+  00:34:31.268 翻 live=true/displayList=false
+  repairs=0，00:34:31.748 repairs=1——恢复泵启动
+  器与第 1 轮确实跑了（+480ms，与 400ms 驻留吻
+  合）；此后直到导出再无任何 backdrop 行：没有
+  displayList=true 恢复行，repairs 也不再有被记录
+  的增长。结论：invalidate+标脏恢复路（2.1.11 一
+  次性版、2.1.12 自驱泵版）连败两版，能启动却始终
+  没让包装节点把 list 录回来，不再做第三次同思路
+  重试。换结构性兜底：退化签名出现后 400ms 由
+  Handler 确认 runnable 直接读宿主状态——包装节
+  点已自行恢复、或宿主 hasUsableBackdrop 已为真
+  （其软件快照路径已被帧流带起）时不动；两者皆无
+  （条身卡在只剩填充的黑底且无帧来救）才落闩
+  softwareBackdropFallback：skipLiveBackdrop 恒
+  true 放行实时场景，pre-draw 转宿主自带软件快照
+  路径，captureBackdrop 以 resolveBackdropScene
+  为源（needsFreshSoftwareBackdrop 同步落闩）把条
+  身后方内容画进 backdrop 位图，hasUsableBackdrop
+  经位图条款恒真、drawBackdropContent 走位图分
+  支、玻璃着色器照常（美团外卖 WebView 页在宿主
+  清扫内同落点）。必然性：黑底充要条件是
+  hasUsableBackdrop 为假；落闩后条身背景与丢失的
+  display list 脱钩，位图软件绘制当场生成、无
+  「丢了无人重录」中间态；代价仅玻璃退化为静态
+  快照（滚动随帧刷新、静止像素正确）。落闩后
+  invalidate 逼一帧完成首捕；切 tab 解闩让实时场
+  景重试，再退化重新落闩。恢复泵整套移除；
+  backdrop 日志改 fallback/episodes 两位，落闩/
+  解闩各有专行。其余链路一律未动。
+- 状态：2.1.13 已发布待验，以上均为代码层修复，未经真机验证。
