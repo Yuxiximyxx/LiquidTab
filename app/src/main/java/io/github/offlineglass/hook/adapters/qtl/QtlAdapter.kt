@@ -75,6 +75,12 @@ import io.github.offlineglass.targets.TargetSpec
  * 落闩整套移除。实证/推断分界与落点详见
  * QtlNavigationState 类注释。本适配 (选源/suppress/点按)
  * 不变。
+ *
+ * 2.1.15: 2.1.14 真机仍不行——形态变平白 (非黑底)。
+ * 日志证宿主软件捕获链通、截图像素证位图无内容; 改由
+ * 导航状态自采背景 (遍历后稳态 scene.draw) 经
+ * videoBackdrop 通道供给, 并带位图内容探针日志。详见
+ * QtlNavigationState 类注释。本适配不变。
  */
 internal object QtlAdapter : TargetAdapter {
     override val key = "qtl"

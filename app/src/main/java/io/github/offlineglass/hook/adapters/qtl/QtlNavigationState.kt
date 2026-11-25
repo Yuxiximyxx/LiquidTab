@@ -15,6 +15,7 @@ import android.widget.TextView
 import io.github.offlineglass.hook.GlassHostLayout
 import io.github.offlineglass.hook.adapters.AdapterNavigationFrame
 import io.github.offlineglass.hook.adapters.AppNavigationState
+import io.github.offlineglass.hook.adapters.AppVideoBackdrop
 import io.github.offlineglass.hook.adapters.NavigationCaptureLabels
 import io.github.offlineglass.hook.compat.XposedBridge
 import kotlin.math.min
@@ -160,6 +161,45 @@ import kotlin.math.min
  * display list 彻底脱钩。代价: 玻璃背景是静态快照
  * (内容变化时按上款刷新); 视频区域在软件绘制下
  * 画不出渲染面内容, 但条身永不黑底。
+ *
+ * 2.1.15 (2.1.14 真机复验 + 日志/截图定案): 小乐装
+ * 2.1.14 后回「还是不行」+ 截图 + LSPosed 日志
+ * (2026-11-25 12:07 会话, 两段进程同形态)。失败形态
+ * 变了: 条身不再黑, 而是整条平坦近白、无内容透出。
+ * 【实证-日志】宿主软件捕获链本身是通的: backdrop 行
+ * mode=software、samplePending true→false (宿主
+ * captureBackdrop 确实执行并经 onSoftwareBackdrop-
+ * Recorded 落账)、snapshot commit 恒 committed-leaf
+ * (artwork 健康)。且宿主捕获循环 idle 间隔为 0, 每
+ * 个 pre-draw 都在重捕, 不是「只采了一张旧图」。
+ * 【实证-像素】截图条内采样全条均匀 (247,247,247)
+ * 上下数十个采样点色差近零; 条上方紧邻的 feed 卡片
+ * 是深色多彩 (均值约 (125,124,115)、数百种颜色),
+ * 其底边距条顶仅约 20px、整段落在捕获 padding 带
+ * (101px) 与折射可达范围内, 条内却零色调。故平白
+ * 来自位图内容本身: 位图里没有页面内容 (或只有背
+ * 景层), 条身只剩 surface 填充 (浅色主题近白)。
+ * 【推断】captureBackdrop 在 pre-draw 时机对宿主父
+ * 层 root.draw(): 该帧内容尚未绘制, 且 Android 的
+ * View.draw 对处于 dirty-opaque 状态的视图会跳过其
+ * 自身绘制——捕获到的是背景层而非成图后的内容; 美
+ * 团软件路径的源是 WebView (软件绘制必出内容), 与
+ * 掌盟原生树不同, 此点为机制推断 (位图内容无日志
+ * 可见, 未逐像素证实宿主位图)。本版改**自采背景**:
+ * onHostFrame 在待采或场景根 isDirty 时, 经 host.
+ * post 把捕获排到本帧遍历完成之后 (稳态、脏标记已
+ * 清) 再 scene.draw() 进自有位图 (全窗几何、1/2 缩
+ * 放), 经 videoBackdrop() 通道供给——该通道在宿主
+ * drawBackdropContent 中优先级最高、按窗口几何把
+ * 位图裁回条身后方, 且 hasUsableBackdrop 经其条款
+ * 成立; 每次捕获 epoch 递增并 invalidate 宿主。自
+ * 采位图带内容探针日志 (self backdrop 行: 不透明
+ * 占比 + 顶部/中部色带均值), 下一轮导日志即可直接
+ * 判定自采位图有没有内容, 不再靠截图猜。宿主软件
+ * 路径保留作自采首图就绪前的兜底 (videoBackdrop
+ * 为 null 时宿主照旧用自有位图)。skipLiveBackdrop
+ * 恒 true 与其余已验好部分 (点击/选中/铺底/槽位/
+ * 圆钮) 不动。
  */
 internal class QtlNavigationState(private val host: GlassHostLayout) : AppNavigationState {
 
@@ -184,8 +224,31 @@ internal class QtlNavigationState(private val host: GlassHostLayout) : AppNaviga
      * INVALIDATED 标记会传到根) 时即使已落账也要求新采样。
      */
     private var softwareSamplePending = true
+    // ---- 2.1.15 自采背景位图 (videoBackdrop 通道) ----
+    /** 自采位图 (全窗几何、1/2 缩放), 经 videoBackdrop 供给宿主。 */
+    private var selfBackdrop: Bitmap? = null
+    /** 自采位图对应的场景窗口几何 (getLocationInWindow + 场景宽高)。 */
+    private var selfSurfaceLeft = 0
+    private var selfSurfaceTop = 0
+    private var selfSurfaceWidth = 0
+    private var selfSurfaceHeight = 0
+    /** 自采代次: 每次成功捕获 +1, 供宿主识别新图。 */
+    private var selfEpoch = 0
+    /** 是否有一张待采的自采图 (初始/切 tab 为 true, 捕获落账为 false)。 */
+    private var selfSamplePending = true
+    /** 已排队一个遍历后捕获时为 true, 防重复排队。 */
+    private var selfCaptureScheduled = false
+    private var lastSelfCaptureAt = 0L
+    private var lastSelfProbeKey: String? = null
+    private var lastSelfProbeAt = 0L
 
     private companion object {
+        /** 自采最小间隔 (滚动时节流全窗软件绘制)。 */
+        const val SELF_CAPTURE_MIN_INTERVAL_MS = 200L
+        /** 自采缩放 (与宿主 CAPTURE_DOWNSCALE 同为 2)。 */
+        const val SELF_CAPTURE_SCALE = 0.5f
+        /** 自采探针日志: 同一内容桶最短间隔。 */
+        const val SELF_PROBE_INTERVAL_MS = 10_000L
         /** 普查不完整时推迟捕获的间隔。 */
         const val CAPTURE_RETRY_DELAY_MS = 300L
         /** staged 校验: 不透明占比超此值视为通用兜底位图, 拒收。 */
@@ -250,18 +313,22 @@ internal class QtlNavigationState(private val host: GlassHostLayout) : AppNaviga
      * 本行与 snapshot commit 行即可分清黑在哪一链。
      */
     override fun onHostFrame(hostView: View) {
+        // 自采调度放在日志早退之前: 它要逐帧看待采/脏状态。
+        maybeScheduleSelfCapture()
         val live = host.liveBackdropActiveForAdapter
         val displayList = host.liveBackdropNodeForAdapter.hasDisplayList()
         val sceneView = resolveBackdropScene(hostView)
         val scene = sceneView != null
-        val key = "$live/$displayList/$scene/$softwareSamplePending"
+        val key = "$live/$displayList/$scene/$softwareSamplePending/$selfSamplePending"
         if (key == lastBackdropLogKey) return
         lastBackdropLogKey = key
         val webView = cachedScene?.let { containsWebView(it) }
         XposedBridge.log(
             "[OfflineGlass][QTL] backdrop: mode=software live=$live " +
                 "displayList=$displayList scene=$scene webView=$webView " +
-                "samplePending=$softwareSamplePending ctx=${contextLabel()}",
+                "samplePending=$softwareSamplePending " +
+                "selfEpoch=$selfEpoch selfPending=$selfSamplePending " +
+                "ctx=${contextLabel()}",
         )
     }
 
@@ -309,10 +376,170 @@ internal class QtlNavigationState(private val host: GlassHostLayout) : AppNaviga
     /** 切 tab = 新页面: 要求为新页重新采一张快照。 */
     override fun onNavigationTabSwitched(index: Int, slotCount: Int, now: Long) {
         softwareSamplePending = true
+        selfSamplePending = true
+        scheduleSelfCapture()
         XposedBridge.log(
             "[OfflineGlass][QTL] backdrop: mode=software sample requested " +
                 "on tab switch index=$index ctx=${contextLabel()}",
         )
+    }
+
+    /**
+     * 自采背景的供给通道 (2.1.15)。宿主 drawBackdropContent
+     * 对 videoBackdrop 的优先级最高: 按此处给的窗口几何
+     * (场景在窗口中的位置与尺寸) 把位图裁回条身后方绘制,
+     * hasUsableBackdrop 亦经其位图条款成立。自采首图就绪
+     * 前返回 null, 宿主退回自有软件位图路径兜底。
+     */
+    override fun videoBackdrop(): AppVideoBackdrop? {
+        val bitmap = selfBackdrop ?: return null
+        if (bitmap.isRecycled || selfSurfaceWidth <= 0 || selfSurfaceHeight <= 0) {
+            return null
+        }
+        return AppVideoBackdrop(
+            bitmap, selfSurfaceLeft, selfSurfaceTop,
+            selfSurfaceWidth, selfSurfaceHeight, selfEpoch,
+        )
+    }
+
+    /**
+     * 逐帧调度 (onHostFrame 调用): 待采或场景根 isDirty
+     * (后代 invalidate 的标记传到根, 含滚动与异步图片
+     * 落图) 时排一次遍历后捕获; 节流 200ms 防滚动期
+     * 每帧全窗软件绘制。
+     */
+    private fun maybeScheduleSelfCapture() {
+        if (selfCaptureScheduled) return
+        val scene = cachedScene ?: return
+        if (!scene.isAttachedToWindow || scene.width <= 0 || scene.height <= 0) return
+        val now = android.os.SystemClock.uptimeMillis()
+        if (now - lastSelfCaptureAt < SELF_CAPTURE_MIN_INTERVAL_MS) return
+        if (!selfSamplePending && !scene.isDirty) return
+        scheduleSelfCapture()
+    }
+
+    /**
+     * 把捕获排到当前帧遍历完成之后: 此刻脏标记已清、
+     * 内容已成图, scene.draw() 画的是稳态画面——与宿主
+     * 在 pre-draw 里捕获 (内容未绘、脏视图跳过自身绘制)
+     * 的关键区别。
+     */
+    private fun scheduleSelfCapture() {
+        if (selfCaptureScheduled) return
+        selfCaptureScheduled = true
+        host.post {
+            selfCaptureScheduled = false
+            runSelfCapture()
+        }
+    }
+
+    /** 执行一次自采: 场景全窗几何软件绘制进自有位图并落账。 */
+    private fun runSelfCapture() {
+        val scene = cachedScene ?: return
+        if (!scene.isAttachedToWindow || scene.width <= 0 || scene.height <= 0) return
+        val width = (scene.width * SELF_CAPTURE_SCALE).toInt().coerceAtLeast(1)
+        val height = (scene.height * SELF_CAPTURE_SCALE).toInt().coerceAtLeast(1)
+        val bitmap = selfBackdrop?.takeIf {
+            it.width == width && it.height == height && !it.isRecycled
+        } ?: Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).also {
+            selfBackdrop?.recycle()
+            selfBackdrop = it
+        }
+        val canvas = Canvas(bitmap)
+        canvas.drawColor(Color.TRANSPARENT, BlendMode.CLEAR)
+        canvas.scale(SELF_CAPTURE_SCALE, SELF_CAPTURE_SCALE)
+        // View.draw 以视图自身为原点绘制, 不带其在父层中的
+        // 偏移; 窗口几何单独记在 surface 字段里供宿主裁切。
+        runCatching { scene.draw(canvas) }
+        val location = IntArray(2)
+        scene.getLocationInWindow(location)
+        selfSurfaceLeft = location[0]
+        selfSurfaceTop = location[1]
+        selfSurfaceWidth = scene.width
+        selfSurfaceHeight = scene.height
+        selfEpoch++
+        lastSelfCaptureAt = android.os.SystemClock.uptimeMillis()
+        selfSamplePending = false
+        probeSelfBackdrop(bitmap)
+        host.invalidate()
+    }
+
+    /**
+     * 自采位图内容探针 (2.1.15 定案用): 步进采样统计不透
+     * 明占比与顶部/中部色带均值。内容齐全时色带应是 feed
+     * 的真实颜色; 只画出背景层时全带近白; 什么都没画出
+     * 时不透明占比近 0。内容桶变化立即打、同桶 10 秒节
+     * 流, 下一轮导日志看这一行即可判定自采成败。
+     */
+    private fun probeSelfBackdrop(bitmap: Bitmap) {
+        if (bitmap.width <= 0 || bitmap.height <= 0) return
+        val step = 8
+        var total = 0
+        var opaque = 0
+        var topR = 0L
+        var topG = 0L
+        var topB = 0L
+        var topN = 0
+        var midR = 0L
+        var midG = 0L
+        var midB = 0L
+        var midN = 0
+        val topBand = bitmap.height / 4
+        val midStart = bitmap.height * 3 / 8
+        val midEnd = bitmap.height * 5 / 8
+        var y = 0
+        while (y < bitmap.height) {
+            var x = 0
+            while (x < bitmap.width) {
+                val pixel = bitmap.getPixel(x, y)
+                total++
+                if (Color.alpha(pixel) >= 128) {
+                    opaque++
+                    when {
+                        y < topBand -> {
+                            topR += Color.red(pixel)
+                            topG += Color.green(pixel)
+                            topB += Color.blue(pixel)
+                            topN++
+                        }
+                        y in midStart until midEnd -> {
+                            midR += Color.red(pixel)
+                            midG += Color.green(pixel)
+                            midB += Color.blue(pixel)
+                            midN++
+                        }
+                    }
+                }
+                x += step
+            }
+            y += step
+        }
+        if (total == 0) return
+        val fraction = opaque.toFloat() / total
+        fun mean(sum: Long, n: Int): Int = if (n == 0) -1 else (sum / n).toInt()
+        val topMean = "${mean(topR, topN)},${mean(topG, topN)},${mean(topB, topN)}"
+        val midMean = "${mean(midR, midN)},${mean(midG, midN)},${mean(midB, midN)}"
+        val key = "${(fraction * 20).toInt()}/$topMean/$midMean"
+        val now = android.os.SystemClock.uptimeMillis()
+        if (key == lastSelfProbeKey && now - lastSelfProbeAt < SELF_PROBE_INTERVAL_MS) {
+            return
+        }
+        lastSelfProbeKey = key
+        lastSelfProbeAt = now
+        XposedBridge.log(
+            "[OfflineGlass][QTL] self backdrop: epoch=$selfEpoch " +
+                "size=${bitmap.width}x${bitmap.height} " +
+                "opaque=${(fraction * 1000).toInt() / 1000f} " +
+                "topRGB=$topMean midRGB=$midMean ctx=${contextLabel()}",
+        )
+    }
+
+    /** 宿主分离时释放自采位图, 下次安装从待采状态重来。 */
+    override fun onHostDetached() {
+        selfBackdrop?.recycle()
+        selfBackdrop = null
+        selfCaptureScheduled = false
+        selfSamplePending = true
     }
 
 

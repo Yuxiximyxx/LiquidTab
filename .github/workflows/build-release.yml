@@ -54,9 +54,9 @@ jobs:
           "$SDK/zipalign" -p -f 4 "$SRC" dist/aligned.apk
           "$SDK/apksigner" sign --ks "$RUNNER_TEMP/liquidtab-release.keystore" \
             --ks-pass env:STORE_PASSWORD --ks-key-alias "$KEY_ALIAS" --key-pass env:KEY_PASSWORD \
-            --out dist/LiquidTab-2.1.14-release.apk dist/aligned.apk
+            --out dist/LiquidTab-2.1.15-release.apk dist/aligned.apk
           rm dist/aligned.apk
-          "$SDK/apksigner" verify --print-certs dist/LiquidTab-2.1.14-release.apk
+          "$SDK/apksigner" verify --print-certs dist/LiquidTab-2.1.15-release.apk
           ls -lh dist
 
       - name: Upload artifact
@@ -69,69 +69,65 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v2.1.14
-          name: LiquidTab 2.1.14（fork：反编译掌盟定案——默认软件快照背景）
+          tag_name: v2.1.15
+          name: LiquidTab 2.1.15（fork：掌盟平白定案——自采背景经 videoBackdrop 供给）
           body: |
-            ## LiquidTab 2.1.14（Yuxiximyxx fork）
+            ## LiquidTab 2.1.15（Yuxiximyxx fork）
 
-            versionName 2.1.14 / versionCode 237。基线仍为 upstream
-            tag v2.1.2 + fork 适配，证书与 2.0.1–2.1.13 相同，
+            versionName 2.1.15 / versionCode 238。基线仍为 upstream
+            tag v2.1.2 + fork 适配，证书与 2.0.1–2.1.14 相同，
             可直接覆盖升级。本版**只动掌盟（qtl）**；小黑盒
             本版不碰。**均为代码层修复，未经真机验证**：
 
-            ### 反编译定案（掌盟 12.10.0，腾讯官方 CDN 同版本包）
+            ### 2.1.14 真机复验定案（日志 + 截图像素）
 
-            - 【实证】GameHomeActivity（singleTask）布局：
-              qt_content（Activity 根）→ HackyDrawerLayout →
-              main_container → 底栏装配；条身后方内容区是
-              tab_content，页签 fragment 由 wegamex tabview
-              装入。模块供给的背景场景就是 qt_content，实时
-              场景采样的是它的 RenderNode。
-            - 【实证】首页「发现」是原生视图树（标题 tab +
-              ViewPager + 原生 RecyclerView feed，无 WebView，
-              与真机日志 webView=false 互证）。
-            - 【实证】feed 的视频条目含 VideoPlayerView，
-              其 video_container（SafeVideoFrameLayout）由
-              播放器在条目绑定/起播时程序化挂入**独立合成的
-              渲染面**——正是宿主接口注释定性的、父级
-              RenderNode 无法可靠采样的那类页面构成。
-            - 【推断】冷启约 8 秒 display list 丢失的时点，
-              与 feed 数据返回、首批视频条目挂载渲染面吻合；
-              触发点本身在日志中不可见，此点为结构推断。
+            - 【实证-日志】2.1.14 的宿主软件捕获链是通的：
+              backdrop 行 mode=software、samplePending
+              true→false 落账、snapshot commit 恒
+              committed-leaf（artwork 健康）；且宿主捕获
+              idle 间隔为 0、每个 pre-draw 都在重捕，不是
+              只采了一张旧图。
+            - 【实证-像素】失败形态由黑变平白：截图条内全条
+              均匀 (247,247,247)；条上方紧邻的 feed 卡片
+              深色多彩、底边距条顶约 20px，整段落在捕获
+              padding 带与折射可达范围内，条内却零色调。
+              故平白来自位图内容本身——位图里没有页面
+              内容，条身只剩浅色主题近白的 surface 填充。
+            - 【推断】宿主 captureBackdrop 在 pre-draw 时机
+              对父层 root.draw()：该帧内容尚未绘制、且
+              dirty-opaque 的视图会跳过自身绘制，捕获到的
+              只有背景层；美团软件路径的源是 WebView（软
+              件绘制必出内容），与掌盟原生树不同。此点为
+              机制推断（宿主位图内容无日志可见）。
 
             ### 本版修法（只动 qtl）
 
-            结论：这类页面不该用实时场景、更不该等它退化
-            再兜底（2.1.11/2.1.12 自愈、2.1.13 事后落闩均
-            未闭环；落闩依赖的帧驱动检测在静态页会随帧流
-            枯竭而饿死）。本版起 qtl **默认软件快照背景**：
-
-            - skipLiveBackdrop 恒 true：宿主从第一帧就放行
-              实时场景，pre-draw 走软件快照路径，以 qt_content
-              为源把条身后方内容画进 backdrop 位图；
-              hasUsableBackdrop 经位图条款成立，条身背景与
-              display list 彻底脱钩，不存在退化时间窗。
-            - 采样新鲜度按美团已验证的同款语义：有待采快照
-              （初始/切 tab 后）时请求新采样，落账后只在场
-              景内容变化（场景根 isDirty）时重采，静止页面
-              不做无谓的全屏软件绘制。
-            - 2.1.13 的退化检测/确认落闩整套移除；backdrop
-              日志改打 mode=software 与 samplePending。
-            - 代价：玻璃背景是静态快照（内容变化时刷新）；
-              视频区域在软件绘制下画不出渲染面内容，但条
-              身永不黑底。已验好的点击对位、选中映射、内
-              容铺底、商城槽位一律未动。
+            - 改**自采背景**：不再依赖宿主的 pre-draw 捕获。
+              导航状态在待采/场景脏时，经 host.post 把捕获
+              排到本帧遍历完成之后（稳态、脏标记已清），把
+              场景（qt_content）以全窗几何、1/2 缩放软件
+              绘制进自有位图。
+            - 自采位图经 **videoBackdrop()** 通道供给：该
+              通道在宿主 drawBackdropContent 中优先级最
+              高，按窗口几何把位图裁回条身后方；每次捕获
+              epoch 递增并刷新宿主。宿主软件路径保留作自
+              采首图就绪前的兜底。
+            - 新增位图内容探针日志（self backdrop 行：不透
+              明占比 + 顶部/中部色带均值），下一轮导日志
+              即可直接判定自采位图有没有内容。
+            - skipLiveBackdrop 恒 true 不变；已验好的点击
+              对位、选中映射、内容铺底、商城槽位、发布圆
+              钮一律未动。
 
             ### 复验要点
 
             - 掌盟强停重开：首页与「发现 → 活动」子页各停
-              留观察（包括停住不动等十几秒）——底栏应始终
-              是有内容的玻璃，不再出现整条黑底；切 tab 流
-              畅、高亮对位、药丸颜色一致不回退。
-            - 若仍黑：请再导出一次 LSPosed 日志发回，看
-              [OfflineGlass][QTL] backdrop 行的
-              mode/samplePending 与 snapshot commit 行继
-              续定案。
+              留观察——底栏应是有内容的玻璃（能透出条身
+              后方的 feed 内容），不再整条平白或黑底；切
+              tab 流畅、高亮对位、药丸颜色一致不回退。
+            - 若仍平白：请再导出一次 LSPosed 日志发回，看
+              [OfflineGlass][QTL] self backdrop 行的
+              opaque 与 topRGB/midRGB 继续定案。
             - 小黑盒本版未动，无需复验。
 
             ### 注意

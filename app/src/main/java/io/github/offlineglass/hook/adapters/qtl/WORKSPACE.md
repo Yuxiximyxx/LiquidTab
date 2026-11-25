@@ -267,3 +267,29 @@
   好部分（点击对位、选中映射、内容铺底、商城槽
   位）未动；heybox 未碰。
 - 状态：2.1.14 已发布待验，以上均为代码层修复，未经真机验证。
+
+## 2.1.15 掌盟平白定案 —— 自采背景经 videoBackdrop 供给
+
+- 背景：2.1.14 真机仍不行，形态由黑底变整条平白；小乐
+  导出 LSPosed 日志（2026-11-25 12:07 会话）+ 截图。
+- 【实证-日志】宿主软件捕获链通：mode=software、
+  samplePending true→false 落账、commit 恒
+  committed-leaf；宿主捕获 idle 间隔 0、每 pre-draw
+  重捕，非旧图问题。
+- 【实证-像素】截图条内全条均匀 (247,247,247)；条上方
+  feed 卡片深色多彩（均值约 (125,124,115)）、底边距条
+  顶约 20px、在 padding 带（101px）与折射范围内，条
+  内零色调 ⇒ 位图无内容、只剩 surface 填充（浅色近白）。
+- 【推断】宿主 captureBackdrop 在 pre-draw 对父层
+  root.draw()，该帧内容未绘且 dirty-opaque 视图跳过
+  自身绘制，只采到背景层；美团软件路径源为 WebView、
+  与原生树不同。位图内容无日志可见，此点未逐像素证实。
+- 落点（只动 qtl）：导航状态自采——onHostFrame 待采/
+  场景脏时经 host.post 排到遍历完成后 scene.draw()
+  进自有位图（全窗几何、1/2 缩放、200ms 节流），经
+  videoBackdrop() 通道供给（宿主 drawBackdropContent
+  最高优先级、按窗口几何裁回），epoch 递增；带内容
+  探针日志（self backdrop 行：opaque + topRGB/midRGB）。
+  宿主软件路径保留作首图前兜底。已验好部分未动；
+  heybox 未碰。
+- 状态：2.1.15 已发布待验，以上均为代码层修复，未经真机验证。
